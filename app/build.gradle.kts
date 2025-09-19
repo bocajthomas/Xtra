@@ -27,10 +27,10 @@ android {
 
     defaultConfig {
         applicationId = "com.github.andreyasadchy.xtra"
-        minSdk = 21
+        minSdk = 23
         targetSdk = 36
         versionCode = 121
-        versionName = "2.47.2"
+        versionName = "2.48.0"
     }
 
     buildTypes {
@@ -97,7 +97,6 @@ dependencies {
     implementation(libs.cronet.api)
     implementation(libs.okhttp)
     implementation(libs.okhttp.logging)
-    implementation(libs.okhttp.tls)
     implementation(libs.conscrypt)
     implementation(libs.serialization.json)
     implementation(libs.apollo.api)
