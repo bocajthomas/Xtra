@@ -49,6 +49,14 @@ android {
     buildFeatures {
         buildConfig = true
         viewBinding = true
+        compose = true
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.14"
     }
     androidResources {
         generateLocaleConfig = true
@@ -72,6 +80,14 @@ dependencies {
     implementation("com.google.mlkit:translate:17.0.3")
 
     implementation(libs.material)
+
+    // Jetpack Compose
+    implementation(platform(libs.compose.bom))
+    implementation(libs.activity.compose)
+    implementation(libs.compose.ui)
+    implementation(libs.compose.ui.tooling.preview)
+    implementation(libs.compose.material3)
+    debugImplementation(libs.compose.ui.tooling)
 
     implementation(libs.activity)
     implementation(libs.appcompat)
@@ -108,6 +124,7 @@ dependencies {
     implementation(libs.media3.session)
 
     implementation(libs.coil)
+    implementation(libs.coil.compose)
     implementation(libs.coil.gif)
     implementation(libs.coil.okhttp)
 

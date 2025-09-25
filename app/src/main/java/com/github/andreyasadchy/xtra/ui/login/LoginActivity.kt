@@ -37,6 +37,7 @@ import com.github.andreyasadchy.xtra.util.shortToast
 import com.github.andreyasadchy.xtra.util.toast
 import com.github.andreyasadchy.xtra.util.tokenPrefs
 import com.github.andreyasadchy.xtra.util.visible
+import com.github.andreyasadchy.xtra.ui.compose.ComposeThemeDemo
 import com.google.android.material.slider.Slider
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.launch
@@ -384,6 +385,11 @@ class LoginActivity : AppCompatActivity() {
             } else {
                 checkUrl = true
                 webView.loadUrl(helixAuthUrl)
+            }
+            
+            // Setup Jetpack Compose integration demo
+            composeView.setContent {
+                ComposeThemeDemo()
             }
         }
     }
