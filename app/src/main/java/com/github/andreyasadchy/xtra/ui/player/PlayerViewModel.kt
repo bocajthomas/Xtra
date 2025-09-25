@@ -5,7 +5,6 @@ import android.net.http.HttpEngine
 import android.net.http.UrlResponseInfo
 import android.os.Build
 import android.os.ext.SdkExtensions
-import android.util.Base64
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.github.andreyasadchy.xtra.model.NotificationUser
@@ -41,18 +40,13 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import okhttp3.Credentials
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okio.buffer
-import okio.sink
 import org.chromium.net.CronetEngine
 import org.chromium.net.apihelpers.RedirectHandlers
 import org.chromium.net.apihelpers.UrlRequestCallbacks
 import java.io.File
 import java.io.FileOutputStream
-import java.net.InetSocketAddress
-import java.net.Proxy
 import java.util.concurrent.ExecutorService
 import javax.inject.Inject
 import kotlin.coroutines.suspendCoroutine
@@ -167,30 +161,11 @@ class PlayerViewModel @Inject constructor(
         }
     }
 
-    fun loadStreamResult(networkLibrary: String?, gqlHeaders: Map<String, String>, channelLogin: String, randomDeviceId: Boolean?, xDeviceId: String?, playerType: String?, supportedCodecs: String?, proxyPlaybackAccessToken: Boolean, proxyMultivariantPlaylist: Boolean, proxyHost: String?, proxyPort: Int?, proxyUser: String?, proxyPassword: String?, enableIntegrity: Boolean) {
+    fun loadStreamResult(networkLibrary: String?, gqlHeaders: Map<String, String>, channelLogin: String, randomDeviceId: Boolean?, xDeviceId: String?, playerType: String?, supportedCodecs: String?, proxyPlaybackAccessToken: Boolean, proxyHost: String?, proxyPort: Int?, proxyUser: String?, proxyPassword: String?, enableIntegrity: Boolean) {
         if (streamResult.value == null) {
             viewModelScope.launch {
                 try {
-                    val url = playerRepository.loadStreamPlaylistUrl(networkLibrary, gqlHeaders, channelLogin, randomDeviceId, xDeviceId, playerType, supportedCodecs, proxyPlaybackAccessToken, proxyHost, proxyPort, proxyUser, proxyPassword, enableIntegrity)
-                    streamResult.value = if (proxyMultivariantPlaylist) {
-                        withContext(Dispatchers.IO) {
-                            val response = okHttpClient.newBuilder().apply {
-                                if (!proxyHost.isNullOrBlank() && proxyPort != null) {
-                                    proxy(Proxy(Proxy.Type.HTTP, InetSocketAddress(proxyHost, proxyPort)))
-                                    if (!proxyUser.isNullOrBlank() && !proxyPassword.isNullOrBlank()) {
-                                        proxyAuthenticator { _, response ->
-                                            response.request.newBuilder().header("Proxy-Authorization", Credentials.basic(proxyUser, proxyPassword)).build()
-                                        }
-                                    }
-                                }
-                            }.build().newCall(Request.Builder().url(url).build()).execute().use { response ->
-                                response.body.string()
-                            }
-                            Base64.encodeToString(response.toByteArray(), Base64.DEFAULT)
-                        }
-                    } else {
-                        url
-                    }
+                    streamResult.value = playerRepository.loadStreamPlaylistUrl(networkLibrary, gqlHeaders, channelLogin, randomDeviceId, xDeviceId, playerType, supportedCodecs, proxyPlaybackAccessToken, proxyHost, proxyPort, proxyUser, proxyPassword, enableIntegrity)
                 } catch (e: Exception) {
                     if (e.message == "failed integrity check" && integrity.value == null) {
                         integrity.value = "refreshStream"
@@ -414,8 +389,10 @@ class PlayerViewModel @Inject constructor(
                                     else -> {
                                         okHttpClient.newCall(Request.Builder().url(it).build()).execute().use { response ->
                                             if (response.isSuccessful) {
-                                                File(path).sink().buffer().use { sink ->
-                                                    sink.writeAll(response.body.source())
+                                                FileOutputStream(path).use { outputStream ->
+                                                    response.body.byteStream().use { inputStream ->
+                                                        inputStream.copyTo(outputStream)
+                                                    }
                                                 }
                                             }
                                         }
@@ -469,8 +446,10 @@ class PlayerViewModel @Inject constructor(
                                     else -> {
                                         okHttpClient.newCall(Request.Builder().url(it).build()).execute().use { response ->
                                             if (response.isSuccessful) {
-                                                File(path).sink().buffer().use { sink ->
-                                                    sink.writeAll(response.body.source())
+                                                FileOutputStream(path).use { outputStream ->
+                                                    response.body.byteStream().use { inputStream ->
+                                                        inputStream.copyTo(outputStream)
+                                                    }
                                                 }
                                             }
                                         }
