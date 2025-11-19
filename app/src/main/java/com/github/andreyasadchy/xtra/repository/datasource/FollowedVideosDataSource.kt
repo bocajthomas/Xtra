@@ -2,7 +2,6 @@ package com.github.andreyasadchy.xtra.repository.datasource
 
 import androidx.paging.PagingSource
 import androidx.paging.PagingState
-import com.github.andreyasadchy.xtra.model.ui.Tag
 import com.github.andreyasadchy.xtra.model.ui.Video
 import com.github.andreyasadchy.xtra.repository.GraphQLRepository
 import com.github.andreyasadchy.xtra.type.BroadcastType
@@ -74,12 +73,6 @@ class FollowedVideosDataSource(
                     duration = it.lengthSeconds?.toString(),
                     thumbnailUrl = it.previewThumbnailURL,
                     profileImageUrl = it.owner?.profileImageURL,
-                    tags = it.contentTags?.map { tag ->
-                        Tag(
-                            id = tag.id,
-                            name = tag.localizedName
-                        )
-                    },
                     animatedPreviewURL = it.animatedPreviewURL
                 )
             }
@@ -110,6 +103,7 @@ class FollowedVideosDataSource(
                     channelLogin = it.owner?.login,
                     channelName = it.owner?.displayName,
                     gameId = it.game?.id,
+                    gameSlug = it.game?.slug,
                     gameName = it.game?.displayName,
                     title = it.title,
                     viewCount = it.viewCount,
@@ -117,12 +111,6 @@ class FollowedVideosDataSource(
                     duration = it.lengthSeconds?.toString(),
                     thumbnailUrl = it.previewThumbnailURL,
                     profileImageUrl = it.owner?.profileImageURL,
-                    tags = it.contentTags?.map { tag ->
-                        Tag(
-                            id = tag.id,
-                            name = tag.localizedName
-                        )
-                    },
                     animatedPreviewURL = it.animatedPreviewURL
                 )
             }

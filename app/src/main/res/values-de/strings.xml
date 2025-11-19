@@ -185,7 +185,6 @@
     <string name="user_affiliate">Partner</string>
     <string name="user_staff">Mitarbeiter*in</string>
     <string name="uptime">%s Uptime</string>
-    <string name="select_language">Sprache wählen</string>
     <string name="show_tags">Tags anzeigen</string>
     <string name="recentMsg_enable">Letzte Nachrichten laden</string>
     <string name="recentMsg_limit">Anzahl der zu ladenden letzten Nachrichten</string>
@@ -364,7 +363,6 @@
     <string name="position">Position: %s</string>
     <string name="player_viewerlist">Zuschauerliste öffnen über Zuschauerzahl</string>
     <string name="use_followpager">Tab-Layout für Folgeseite verwenden</string>
-    <string name="default_follow_tab">Standard-Tab zum Folgen</string>
     <string name="sleep_timer_lock">Danach Display sperren</string>
     <string name="sleep_timer_lock_permissions">Danach Display sperren (benötigt Admin-Rechte)</string>
     <string name="admin_settings">Als Geräte Admin App aktivieren/deaktivieren</string>
@@ -405,7 +403,6 @@
     <string name="vod_ignore_user">Automatisches Löschen für diesen Benutzer ignorieren</string>
     <string name="bookmarks">Lesezeichen</string>
     <string name="use_savedpager">Tabs Layout für gespeicherte Seite nutzen</string>
-    <string name="default_saved_tab">Gespeichert als Standardseite</string>
     <string name="vod_remove_ignore">Von Ignorierliste entfernen</string>
     <string name="remove_bookmark">Lesezeichen entfernen</string>
     <string name="saved">Gespeichert</string>
@@ -453,7 +450,6 @@
     <string name="save_default">Als Standard speichern</string>
     <string name="viewers_high">Zuschauer (viel zu wenig)</string>
     <string name="viewers_low">Zuschauer (wenig zu viel)</string>
-    <string name="tags">Tags</string>
     <string name="search_videos">Videos durchsuchen</string>
     <string name="points_earned">%d Kanalpunkte verdient</string>
     <string name="points_notify">Benachrichtigen, wenn Kanal Punkte gesammelt wurden</string>
@@ -473,7 +469,6 @@
     <string name="followed_only">Nur Follower</string>
     <string name="debug_api_commands">API Chat Kommandos benutzen</string>
     <string name="skip_video_access_token">Video Zugriff-Token überspringen</string>
-    <string name="skip_clip_access_token">Clip Zugriff-Token überspringen</string>
     <string name="skipVideoTokenEntries1">Immer überspringen</string>
     <string name="skipVideoTokenEntries2">Immer überspringen, außer die Wiedergabe schlägt fehl</string>
     <string name="skipVideoTokenEntries3">Nicht überspringen, außer die Wiedergabe schlägt fehl</string>
@@ -682,7 +677,6 @@
     <string name="avoid_rounded_corners">Vermeide abgerundete Bildschirmecken</string>
     <string name="api_web_gql_token">Web-GQL-Token</string>
     <string name="use_new_pubsub">Neue PubSub-URL verwenden</string>
-    <string name="default_page">Standardseite</string>
     <string name="chat_size_modifier">Größenmodifikator</string>
     <string name="chat_emote_size">Emote-Größe</string>
     <string name="chat_badge_size">Abzeichengröße</string>
@@ -699,8 +693,25 @@
     <string name="download_language_model_message">Sprachmodell für %s herunterladen?</string>
     <string name="translate_from_selected">Aus der ausgewählten Sprache übersetzen</string>
     <string name="translate_all_messages">Übersetze alle Nachrichten auf diesem Kanal</string>
-    <string name="use_custom_websockets">Use custom WebSockets</string>
-    <string name="show_more_websocket_info">Show more info about WebSockets</string>
-    <string name="websocket_connected">%s: Connected</string>
-    <string name="websocket_disconnected">%1$s: Disconnected - %2$s</string>
+    <string name="use_custom_websockets">Verwende benutzerdefinierte WebSockets</string>
+    <string name="show_more_websocket_info">Weitere Informationen zu WebSockets anzeigen</string>
+    <string name="websocket_connected">%s: Verbunden</string>
+    <string name="websocket_disconnected">%1$s: Getrennt - %2$s</string>
+    <string name="sort_and_type">Sortieren nach: %1$s. Typ: %2$s</string>
+    <string name="search_tags">Suchbegriffe</string>
+    <string name="invalid_directory">Ungültiges Verzeichnis</string>
+    <string name="suggested">Empfohlen</string>
+    <string name="languages">Sprachen</string>
+    <string name="recent">Kürzlich begonnen</string>
+    <string name="filters">Filter</string>
+    <string name="sort_by">Sortieren nach: %1$s</string>
+    <string name="following_tabs">Folgende Tabs</string>
+    <string name="saved_tabs">Gespeicherte Tabs</string>
+    <string name="channel_tabs">Kanal-Tabs</string>
+    <string name="game_tabs">Spiel-Tabs</string>
+    <string name="search_tabs">Such-Tabs</string>
+    <string name="add_tag">Tag hinzufügen</string>
+    <string name="save_filters">Filter speichern</string>
+    <string name="delete_filter_message">Möchtest du diesen Filter wirklich löschen?</string>
+    <string name="use_custom_playback_service">Use custom playback service</string>
 </resources>

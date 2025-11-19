@@ -84,9 +84,15 @@ class ChannelPagerFragment : BaseNetworkFragment(), Scrollable, FragmentHost, In
     private val binding get() = _binding!!
     private val args: ChannelPagerFragmentArgs by navArgs()
     private val viewModel: ChannelPagerViewModel by viewModels()
+    private var firstLaunch = true
 
     override val currentFragment: Fragment?
         get() = childFragmentManager.findFragmentByTag("f${binding.viewPager.currentItem}")
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        firstLaunch = savedInstanceState == null
+    }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         _binding = FragmentChannelBinding.inflate(inflater, container, false)
@@ -400,6 +406,35 @@ class ChannelPagerFragment : BaseNetworkFragment(), Scrollable, FragmentHost, In
                     }
                 }
             }
+            val tabList = requireContext().prefs().getString(C.UI_CHANNEL_TABS, null).let { tabPref ->
+                val defaultTabs = C.DEFAULT_CHANNEL_TABS.split(',')
+                if (tabPref != null) {
+                    val list = tabPref.split(',').filter { item ->
+                        defaultTabs.find { it.first() == item.first() } != null
+                    }.toMutableList()
+                    defaultTabs.forEachIndexed { index, item ->
+                        if (list.find { it.first() == item.first() } == null) {
+                            list.add(index, item)
+                        }
+                    }
+                    list
+                } else defaultTabs
+            }
+            val tabs = tabList.mapNotNull {
+                val split = it.split(':')
+                val key = split[0]
+                val enabled = split[2] != "0"
+                if (enabled) {
+                    key
+                } else {
+                    null
+                }
+            }
+            if (tabs.size <= 1) {
+                tabLayout.gone()
+            }
+            val adapter = ChannelPagerAdapter(this@ChannelPagerFragment, args, tabs)
+            viewPager.adapter = adapter
             if (!requireContext().prefs().getBoolean(C.UI_THEME_APPBAR_LIFT, true)) {
                 appBar.setLiftable(false)
                 appBar.background = null
@@ -410,7 +445,7 @@ class ChannelPagerFragment : BaseNetworkFragment(), Scrollable, FragmentHost, In
                 private val originalScrollFlags = layoutParams.scrollFlags
 
                 override fun onPageSelected(position: Int) {
-                    layoutParams.scrollFlags = if (position != 2) {
+                    layoutParams.scrollFlags = if (tabs.getOrNull(position) != "3") {
                         originalScrollFlags
                     } else {
                         appBar.setExpanded(false, isResumed)
@@ -440,15 +475,23 @@ class ChannelPagerFragment : BaseNetworkFragment(), Scrollable, FragmentHost, In
                     }
                 }
             })
-            val adapter = ChannelPagerAdapter(this@ChannelPagerFragment, args)
-            viewPager.adapter = adapter
+            if (firstLaunch) {
+                val defaultItem = tabList.find { it.split(':')[1] != "0" }?.split(':')[0] ?: "1"
+                viewPager.setCurrentItem(
+                    tabs.indexOf(defaultItem).takeIf { it != -1 } ?: tabs.indexOf("1").takeIf { it != -1 } ?: 0,
+                    false
+                )
+                firstLaunch = false
+            }
             viewPager.offscreenPageLimit = adapter.itemCount
             viewPager.reduceDragSensitivity()
             TabLayoutMediator(tabLayout, viewPager) { tab, position ->
-                tab.text = when (position) {
-                    0 -> getString(R.string.videos)
-                    1 -> getString(R.string.clips)
-                    else -> getString(R.string.chat)
+                tab.text = when (tabs.getOrNull(position)) {
+                    "0" -> getString(R.string.suggested)
+                    "1" -> getString(R.string.videos)
+                    "2" -> getString(R.string.clips)
+                    "3" -> getString(R.string.chat)
+                    else -> getString(R.string.videos)
                 }
             }.attach()
             ViewCompat.setOnApplyWindowInsetsListener(view) { _, windowInsets ->
@@ -610,7 +653,7 @@ class ChannelPagerFragment : BaseNetworkFragment(), Scrollable, FragmentHost, In
             }
             if (requireContext().prefs().getBoolean(C.UI_UPTIME, true)) {
                 if (stream?.startedAt != null) {
-                    TwitchApiHelper.getUptime(requireContext(), stream.startedAt).let {
+                    TwitchApiHelper.getUptime(stream.startedAt).let {
                         if (it != null) {
                             streamLayout.visible()
                             uptime.visible()

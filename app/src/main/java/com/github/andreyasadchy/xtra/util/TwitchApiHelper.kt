@@ -100,18 +100,18 @@ object TwitchApiHelper {
         } else return null
     }
 
-    fun getUptime(context: Context, input: String?): String? {
-        return if (input != null) {
+    fun getUptime(startedAt: String?): String? {
+        return if (startedAt != null) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val createdAt = try {
-                    Instant.parse(input)
+                    Instant.parse(startedAt)
                 } catch (e: DateTimeParseException) {
                     null
                 }
                 if (createdAt != null) {
                     val diff = Duration.between(createdAt, Instant.now())
                     if (!diff.isNegative) {
-                        getDurationFromSeconds(context, diff.seconds.toString(), false)
+                        DateUtils.formatElapsedTime(diff.seconds)
                     } else null
                 } else null
             } else {
@@ -119,13 +119,13 @@ object TwitchApiHelper {
                 val format = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.getDefault())
                 format.timeZone = TimeZone.getTimeZone("UTC")
                 val createdAt = try {
-                    format.parse(input)?.time
+                    format.parse(startedAt)?.time
                 } catch (e: ParseException) {
                     null
                 }
                 val diff = if (createdAt != null) ((currentTime - createdAt) / 1000) else null
                 if (diff != null && diff >= 0) {
-                    getDurationFromSeconds(context, diff.toString(), false)
+                    DateUtils.formatElapsedTime(diff)
                 } else null
             }
         } else null
@@ -357,22 +357,6 @@ object TwitchApiHelper {
         return System.currentTimeMillis() >= context.tokenPrefs().getLong(C.INTEGRITY_EXPIRATION, 0)
     }
 
-    val gamesApiDefaults = listOf(C.GQL, C.GQL_PERSISTED_QUERY, C.HELIX)
-    val streamsApiDefaults = listOf(C.GQL, C.GQL_PERSISTED_QUERY, C.HELIX)
-    val gameStreamsApiDefaults = listOf(C.GQL, C.GQL_PERSISTED_QUERY, C.HELIX)
-    val gameVideosApiDefaults = listOf(C.GQL, C.GQL_PERSISTED_QUERY, C.HELIX)
-    val gameClipsApiDefaults = listOf(C.GQL, C.HELIX, C.GQL_PERSISTED_QUERY)
-    val channelVideosApiDefaults = listOf(C.GQL, C.GQL_PERSISTED_QUERY, C.HELIX)
-    val channelClipsApiDefaults = listOf(C.GQL, C.HELIX, C.GQL_PERSISTED_QUERY)
-    val searchVideosApiDefaults = listOf(C.GQL, C.GQL_PERSISTED_QUERY)
-    val searchStreamsApiDefaults = listOf(C.GQL, C.HELIX)
-    val searchChannelsApiDefaults = listOf(C.GQL, C.HELIX, C.GQL_PERSISTED_QUERY)
-    val searchGamesApiDefaults = listOf(C.GQL, C.GQL_PERSISTED_QUERY, C.HELIX)
-    val followedStreamsApiDefaults = listOf(C.GQL, C.HELIX, C.GQL_PERSISTED_QUERY)
-    val followedVideosApiDefaults = listOf(C.GQL, C.GQL_PERSISTED_QUERY)
-    val followedChannelsApiDefaults = listOf(C.GQL, C.GQL_PERSISTED_QUERY, C.HELIX)
-    val followedGamesApiDefaults = listOf(C.GQL, C.GQL_PERSISTED_QUERY)
-
     fun getVideoUrlMapFromPreview(url: String, type: String?, list: List<String>?): Map<String, String> {
         val qualityList = list ?: listOf("chunked", "1080p60", "1080p30", "720p60", "720p30", "480p30", "360p30", "160p30", "144p30", "high", "medium", "low", "mobile", "audio_only")
         val map = mutableMapOf<String, String>()
@@ -388,10 +372,6 @@ object TwitchApiHelper {
                 )
         }
         return map
-    }
-
-    fun getClipUrlMapFromPreview(url: String): Map<String, String> {
-        return mapOf(Pair("source", url.substringBefore("-preview") + ".mp4"))
     }
 
     fun getMessageIdString(msgId: String?): String? {

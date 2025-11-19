@@ -30,6 +30,7 @@ class DownloadViewModel @Inject constructor(
     val qualities: StateFlow<Map<String, Pair<String, String>>?> = _qualities
     val dismiss = MutableStateFlow(false)
     var backupQualities: List<String>? = null
+    var selectedQuality: String? = null
 
     fun setStream(networkLibrary: String?, gqlHeaders: Map<String, String>, channelLogin: String?, qualities: Map<String, Pair<String, String>>?, randomDeviceId: Boolean?, xDeviceId: String?, playerType: String?, supportedCodecs: String?, enableIntegrity: Boolean) {
         if (_qualities.value == null) {
@@ -39,21 +40,61 @@ class DownloadViewModel @Inject constructor(
                 viewModelScope.launch {
                     val default = mutableMapOf("source" to "", "1080p60" to "", "1080p30" to "", "720p60" to "", "720p30" to "", "480p30" to "", "360p30" to "", "160p30" to "", "audio_only" to "")
                     try {
-                        val urls = if (!channelLogin.isNullOrBlank()) {
+                        val map = if (!channelLogin.isNullOrBlank()) {
                             val playlist = playerRepository.loadStreamPlaylist(networkLibrary, gqlHeaders, channelLogin, randomDeviceId, xDeviceId, playerType, supportedCodecs, enableIntegrity)
                             if (!playlist.isNullOrBlank()) {
-                                val names = "NAME=\"(.*)\"".toRegex().findAll(playlist).map { it.groupValues[1] }.toMutableList()
-                                val urls = "https://.*\\.m3u8".toRegex().findAll(playlist).map(MatchResult::value).toMutableList()
-                                names.zip(urls).toMap(mutableMapOf()).takeIf { it.isNotEmpty() } ?: default
-                            } else default
-                        } else default
-                        val map = mutableMapOf<String, Pair<String, String>>()
-                        urls.entries.forEach {
-                            when (it.key) {
-                                "source" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.source), it.value)
-                                "audio_only" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.audio_only), it.value)
-                                else -> map[it.key] = Pair(it.key, it.value)
+                                val names = Regex("NAME=\"(.+?)\"").findAll(playlist).mapNotNull { it.groups[1]?.value }.toMutableList()
+                                val codecs = Regex("CODECS=\"(.+?)\"").findAll(playlist).mapNotNull { it.groups[1]?.value }.toMutableList()
+                                val urls = Regex("https://.*\\.m3u8").findAll(playlist).map(MatchResult::value).toMutableList()
+                                val codecList = codecs.map { codec ->
+                                    codec.substringBefore('.').let {
+                                        when (it) {
+                                            "av01" -> "AV1"
+                                            "hev1" -> "H.265"
+                                            "avc1" -> "H.264"
+                                            else -> it
+                                        }
+                                    }
+                                }.takeUnless { it.all { it == "H.264" || it == "mp4a" } }
+                                val map = mutableMapOf<String, Pair<String, String>>()
+                                names.forEachIndexed { index, quality ->
+                                    urls.getOrNull(index)?.let { url ->
+                                        when {
+                                            quality.equals("source", true) -> {
+                                                val quality = ContextCompat.getString(applicationContext, R.string.source)
+                                                map["source"] = Pair(codecList?.getOrNull(index)?.let { "$quality $it" } ?: quality, url)
+                                            }
+                                            quality.startsWith("audio", true) -> {
+                                                map["audio_only"] = Pair(ContextCompat.getString(applicationContext, R.string.audio_only), url)
+                                            }
+                                            else -> {
+                                                map[quality] = Pair(codecList?.getOrNull(index)?.let { "$quality $it" } ?: quality, url)
+                                            }
+                                        }
+                                    }
+                                }
+                                map
+                            } else {
+                                val map = mutableMapOf<String, Pair<String, String>>()
+                                default.entries.forEach {
+                                    when (it.key) {
+                                        "source" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.source), it.value)
+                                        "audio_only" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.audio_only), it.value)
+                                        else -> map[it.key] = Pair(it.key, it.value)
+                                    }
+                                }
+                                map
                             }
+                        } else {
+                            val map = mutableMapOf<String, Pair<String, String>>()
+                            default.entries.forEach {
+                                when (it.key) {
+                                    "source" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.source), it.value)
+                                    "audio_only" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.audio_only), it.value)
+                                    else -> map[it.key] = Pair(it.key, it.value)
+                                }
+                            }
+                            map
                         }
                         _qualities.value = map.toList()
                             .sortedByDescending {
@@ -199,7 +240,8 @@ class DownloadViewModel @Inject constructor(
                                     urls.getOrNull(index)?.let { url ->
                                         when {
                                             quality.equals("source", true) -> {
-                                                map["source"] = Pair(ContextCompat.getString(applicationContext, R.string.source), url)
+                                                val quality = ContextCompat.getString(applicationContext, R.string.source)
+                                                map["source"] = Pair(codecList?.getOrNull(index)?.let { "$quality $it" } ?: quality, url)
                                             }
                                             quality.startsWith("audio", true) -> {
                                                 map["audio_only"] = Pair(ContextCompat.getString(applicationContext, R.string.audio_only), url)
@@ -263,28 +305,46 @@ class DownloadViewModel @Inject constructor(
         }
     }
 
-    fun setClip(networkLibrary: String?, gqlHeaders: Map<String, String>, clipId: String?, thumbnailUrl: String?, qualities: Map<String, Pair<String, String>>?, skipAccessToken: Int, enableIntegrity: Boolean) {
+    fun setClip(networkLibrary: String?, gqlHeaders: Map<String, String>, clipId: String?, qualities: Map<String, Pair<String, String>>?, enableIntegrity: Boolean) {
         if (_qualities.value == null) {
             if (!qualities.isNullOrEmpty()) {
                 _qualities.value = qualities
             } else {
                 viewModelScope.launch {
                     try {
-                        val urls = if (skipAccessToken <= 1 && !thumbnailUrl.isNullOrBlank()) {
-                            TwitchApiHelper.getClipUrlMapFromPreview(thumbnailUrl)
-                        } else {
-                            playerRepository.loadClipUrls(networkLibrary, gqlHeaders, clipId, enableIntegrity) ?:
-                            if (skipAccessToken == 2 && !thumbnailUrl.isNullOrBlank()) {
-                                TwitchApiHelper.getClipUrlMapFromPreview(thumbnailUrl)
-                            } else null
-                        }
+                        val urls = playerRepository.loadClipUrls(networkLibrary, gqlHeaders, clipId, enableIntegrity)
+                        val hideCodecs = urls?.all {
+                            it.key.second?.substringBefore('.').let { codec ->
+                                codec == "avc1" || codec == "mp4a" || codec.isNullOrBlank()
+                            }
+                        } == true
                         val map = mutableMapOf<String, Pair<String, String>>()
                         urls?.entries?.forEach {
-                            when (it.key) {
-                                "source" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.source), it.value)
-                                "audio_only" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.audio_only), it.value)
-                                else -> map[it.key] = Pair(it.key, it.value)
+                            val quality = it.key.first.let { quality ->
+                                if (quality == "audio_only") {
+                                    ContextCompat.getString(applicationContext, R.string.audio_only)
+                                } else {
+                                    val quality = if (quality == "source") {
+                                        ContextCompat.getString(applicationContext, R.string.source)
+                                    } else {
+                                        quality
+                                    }
+                                    if (hideCodecs) {
+                                        quality
+                                    } else {
+                                        val codec = it.key.second?.substringBefore('.').let { codec ->
+                                            when {
+                                                codec == "av01" -> "AV1"
+                                                codec == "hev1" || codec == "hvc1" -> "H.265"
+                                                codec == "avc1" || codec.isNullOrBlank() -> "H.264"
+                                                else -> it
+                                            }
+                                        }
+                                        "$quality $codec"
+                                    }
+                                }
                             }
+                            map[it.key.first] = Pair(quality, it.value)
                         }
                         _qualities.value = map.toList()
                             .sortedByDescending {

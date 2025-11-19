@@ -3,6 +3,7 @@
     <string name="app_name" translatable="false">Xtra</string>
     <string name="notification_downloads_channel_id" translatable="false">xtra_downloads_channel</string>
     <string name="notification_live_channel_id" translatable="false">xtra_live_channel</string>
+    <string name="notification_playback_channel_id" translatable="false">xtra_playback_channel</string>
     <string name="lang_de" translatable="false">Deutsch</string>
     <string name="lang_en" translatable="false">English</string>
     <string name="lang_es" translatable="false">Español</string>
@@ -201,7 +202,6 @@
     <string name="user_affiliate">Affiliate</string>
     <string name="user_staff">Staff</string>
     <string name="uptime">%s uptime</string>
-    <string name="select_language">Select language</string>
     <string name="show_tags">Show tags</string>
     <string name="recentMsg_enable">Load recent messages</string>
     <string name="recentMsg_limit">Recent message limit</string>
@@ -380,7 +380,6 @@
     <string name="position">Position: %s</string>
     <string name="player_viewerlist">Open viewer list from view count</string>
     <string name="use_followpager">Use tabs layout for following page</string>
-    <string name="default_follow_tab">Default following tab</string>
     <string name="sleep_timer_lock">Lock screen after</string>
     <string name="sleep_timer_lock_permissions">Lock screen after (requires admin permissions)</string>
     <string name="admin_settings">Enable/disable as device admin app</string>
@@ -421,7 +420,6 @@
     <string name="vod_ignore_user">Ignore auto deletion for this user</string>
     <string name="bookmarks">Bookmarks</string>
     <string name="use_savedpager">Use tabs layout for saved page</string>
-    <string name="default_saved_tab">Default saved tab</string>
     <string name="vod_remove_ignore">Remove from ignore list</string>
     <string name="remove_bookmark">Remove bookmark</string>
     <string name="saved">Saved</string>
@@ -469,7 +467,6 @@
     <string name="save_default">Save as default</string>
     <string name="viewers_high">Viewers (high to low)</string>
     <string name="viewers_low">Viewers (low to high)</string>
-    <string name="tags">Tags</string>
     <string name="search_videos">Search videos</string>
     <string name="points_earned">Received %d channel points</string>
     <string name="points_notify">Notify when earning channel points</string>
@@ -489,7 +486,6 @@
     <string name="followed_only">Followed only</string>
     <string name="debug_api_commands">Use api chat commands</string>
     <string name="skip_video_access_token">Skip video access token</string>
-    <string name="skip_clip_access_token">Skip clip access token</string>
     <string name="skipVideoTokenEntries1">Skip always</string>
     <string name="skipVideoTokenEntries2">Skip by default, don\'t skip if playback fails</string>
     <string name="skipVideoTokenEntries3">Don\'t skip by default, skip if playback fails</string>
@@ -698,7 +694,6 @@
     <string name="avoid_rounded_corners">Avoid rounded screen corners</string>
     <string name="api_web_gql_token">Web GQL token</string>
     <string name="use_new_pubsub">Use new PubSub url</string>
-    <string name="default_page">Default page</string>
     <string name="chat_size_modifier">Size modifier</string>
     <string name="chat_emote_size">Emote size</string>
     <string name="chat_badge_size">Badge size</string>
@@ -719,4 +714,21 @@
     <string name="show_more_websocket_info">Show more info about WebSockets</string>
     <string name="websocket_connected">%s: Connected</string>
     <string name="websocket_disconnected">%1$s: Disconnected - %2$s</string>
+    <string name="sort_and_type">Sort by: %1$s. Type: %2$s</string>
+    <string name="search_tags">Search tags</string>
+    <string name="invalid_directory">Invalid directory</string>
+    <string name="suggested">Suggested</string>
+    <string name="languages">Languages</string>
+    <string name="recent">Recently started</string>
+    <string name="filters">Filters</string>
+    <string name="sort_by">Sort by: %1$s</string>
+    <string name="following_tabs">Following tabs</string>
+    <string name="saved_tabs">Saved tabs</string>
+    <string name="channel_tabs">Channel tabs</string>
+    <string name="game_tabs">Game tabs</string>
+    <string name="search_tabs">Search tabs</string>
+    <string name="add_tag">Add tag</string>
+    <string name="save_filters">Save filters</string>
+    <string name="delete_filter_message">Are you sure you want to delete this filter?</string>
+    <string name="use_custom_playback_service">Use custom playback service</string>
 </resources>
