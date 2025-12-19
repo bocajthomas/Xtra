@@ -30,7 +30,7 @@ android {
         minSdk = 23
         targetSdk = 36
         versionCode = 121
-        versionName = "2.51.1"
+        versionName = "2.52.1"
     }
 
     buildTypes {
@@ -72,13 +72,14 @@ dependencies {
     implementation("com.google.mlkit:translate:17.0.3")
 
     implementation(libs.material)
+    implementation(libs.markwon.core)
+    implementation(libs.markwon.linkify)
 
     implementation(libs.activity)
     implementation(libs.appcompat)
     implementation(libs.constraintlayout)
     implementation(libs.coordinatorlayout)
     implementation(libs.core.ktx)
-    implementation(libs.customview)
     implementation(libs.fragment.ktx)
     implementation(libs.lifecycle.viewmodel)
     implementation(libs.navigation.fragment)

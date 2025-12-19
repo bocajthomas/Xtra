@@ -3,6 +3,7 @@ package com.github.andreyasadchy.xtra.ui.main
 import android.app.ActivityOptions
 import android.app.PictureInPictureParams
 import android.app.admin.DevicePolicyManager
+import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -64,8 +65,10 @@ import com.github.andreyasadchy.xtra.ui.common.IntegrityDialog
 import com.github.andreyasadchy.xtra.ui.common.Scrollable
 import com.github.andreyasadchy.xtra.ui.game.GameMediaFragmentDirections
 import com.github.andreyasadchy.xtra.ui.game.GamePagerFragmentDirections
+import com.github.andreyasadchy.xtra.ui.player.ExoPlayerFragment
+import com.github.andreyasadchy.xtra.ui.player.Media3Fragment
 import com.github.andreyasadchy.xtra.ui.player.PlayerFragment
-import com.github.andreyasadchy.xtra.ui.view.SlidingLayout
+import com.github.andreyasadchy.xtra.ui.team.TeamFragmentDirections
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.DisplayUtils
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
@@ -88,7 +91,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.concurrent.schedule
 
 @AndroidEntryPoint
-class MainActivity : AppCompatActivity(), SlidingLayout.Listener {
+class MainActivity : AppCompatActivity() {
 
     companion object {
         const val KEY_VIDEO = "video"
@@ -128,7 +131,7 @@ class MainActivity : AppCompatActivity(), SlidingLayout.Listener {
                     moveTaskToBack(false)
                 }
                 INTENT_PLAY_PAUSE_PLAYER -> {
-                    playerFragment?.handlePlayPauseAction()
+                    playerFragment?.playPause()
                 }
             }
         }
@@ -254,13 +257,15 @@ class MainActivity : AppCompatActivity(), SlidingLayout.Listener {
                             .setMessage(getString(R.string.update_message))
                             .setPositiveButton(getString(R.string.yes)) { _, _ ->
                                 if (prefs.getBoolean(C.UPDATE_USE_BROWSER, false)) {
-                                    val intent = Intent(Intent.ACTION_VIEW, it.toUri())
-                                    if (intent.resolveActivity(packageManager) != null) {
+                                    try {
+                                        val intent = Intent(Intent.ACTION_VIEW, it.toUri()).apply {
+                                            addCategory(Intent.CATEGORY_BROWSABLE)
+                                        }
+                                        startActivity(intent)
                                         tokenPrefs().edit {
                                             putLong(C.UPDATE_LAST_CHECKED, System.currentTimeMillis())
                                         }
-                                        startActivity(intent)
-                                    } else {
+                                    } catch (e: ActivityNotFoundException) {
                                         toast(R.string.no_browser_found)
                                     }
                                 } else {
@@ -352,7 +357,7 @@ class MainActivity : AppCompatActivity(), SlidingLayout.Listener {
         connectivityManager.unregisterNetworkCallback(networkCallback)
         unregisterReceiver(pipActionReceiver)
         if (isFinishing) {
-            playerFragment?.onClose()
+            playerFragment?.close()
         }
         super.onDestroy()
     }
@@ -374,11 +379,11 @@ class MainActivity : AppCompatActivity(), SlidingLayout.Listener {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
-            Build.VERSION.SDK_INT < Build.VERSION_CODES.S &&
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
             prefs.getBoolean(C.PLAYER_PICTURE_IN_PICTURE, true) &&
-            playerFragment?.enterPictureInPicture() == true
+            playerFragment?.canEnterPictureInPicture() == true
         ) {
             try {
                 enterPictureInPictureMode(PictureInPictureParams.Builder().build())
@@ -502,6 +507,17 @@ class MainActivity : AppCompatActivity(), SlidingLayout.Listener {
                             )
                         }
                     }
+                    url.contains("twitch.tv/team/") -> {
+                        val teamName = url.substringAfter("twitch.tv/team/").takeIf { it.isNotBlank() }?.let { it.substringBefore("?", it.substringBefore("/")) }
+                        if (!teamName.isNullOrBlank()) {
+                            playerFragment?.minimize()
+                            navController.navigate(
+                                TeamFragmentDirections.actionGlobalTeamFragment(
+                                    teamName = teamName
+                                )
+                            )
+                        }
+                    }
                     else -> {
                         val login = url.substringAfter("twitch.tv/").takeIf { it.isNotBlank() }?.let { it.substringBefore("?", it.substringBefore("/")) }
                         if (!login.isNullOrBlank()) {
@@ -586,45 +602,51 @@ class MainActivity : AppCompatActivity(), SlidingLayout.Listener {
 //Navigation listeners
 
     fun startStream(stream: Stream) {
-        startPlayer(PlayerFragment.newInstance(stream))
+        val fragment = if (prefs.getBoolean(C.DEBUG_USE_CUSTOM_PLAYBACK_SERVICE, false)) {
+            ExoPlayerFragment.newInstance(stream)
+        } else {
+            Media3Fragment.newInstance(stream)
+        }
+        startPlayer(fragment)
     }
 
     fun startVideo(video: Video, offset: Long?, ignoreSavedPosition: Boolean = false) {
-        startPlayer(PlayerFragment.newInstance(video, offset, ignoreSavedPosition))
+        val fragment = if (prefs.getBoolean(C.DEBUG_USE_CUSTOM_PLAYBACK_SERVICE, false)) {
+            ExoPlayerFragment.newInstance(video, offset, ignoreSavedPosition)
+        } else {
+            Media3Fragment.newInstance(video, offset, ignoreSavedPosition)
+        }
+        startPlayer(fragment)
     }
 
     fun startClip(clip: Clip) {
-        startPlayer(PlayerFragment.newInstance(clip))
+        val fragment = if (prefs.getBoolean(C.DEBUG_USE_CUSTOM_PLAYBACK_SERVICE, false)) {
+            ExoPlayerFragment.newInstance(clip)
+        } else {
+            Media3Fragment.newInstance(clip)
+        }
+        startPlayer(fragment)
     }
 
     fun startOfflineVideo(video: OfflineVideo) {
-        startPlayer(PlayerFragment.newInstance(video))
-    }
-
-//SlidingLayout.Listener
-
-    override fun onMaximize() {
-        viewModel.onMaximize()
-    }
-
-    override fun onMinimize() {
-        viewModel.onMinimize()
-    }
-
-    override fun onClose() {
-        closePlayer()
+        val fragment = if (prefs.getBoolean(C.DEBUG_USE_CUSTOM_PLAYBACK_SERVICE, false)) {
+            ExoPlayerFragment.newInstance(video)
+        } else {
+            Media3Fragment.newInstance(video)
+        }
+        startPlayer(fragment)
     }
 
 //Player methods
 
     private fun startPlayer(fragment: PlayerFragment) {
-        playerFragment?.onClose()
+        playerFragment?.close()
         playerFragment = fragment
         supportFragmentManager.beginTransaction()
             .replace(R.id.playerContainer, fragment).commit()
-        viewModel.onPlayerStarted()
-        if (packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+        viewModel.isPlayerOpened = true
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
             prefs.getBoolean(C.PLAYER_PICTURE_IN_PICTURE, true)
         ) {
             setPictureInPictureParams(PictureInPictureParams.Builder().setAutoEnterEnabled(true).build())
@@ -637,8 +659,8 @@ class MainActivity : AppCompatActivity(), SlidingLayout.Listener {
             .remove(supportFragmentManager.findFragmentById(R.id.playerContainer)!!)
             .commit()
         playerFragment = null
-        viewModel.onPlayerClosed()
-        if (packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        viewModel.isPlayerOpened = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) {
             setPictureInPictureParams(PictureInPictureParams.Builder().setAutoEnterEnabled(false).build())
         }
         viewModel.sleepTimer?.cancel()
@@ -664,8 +686,8 @@ class MainActivity : AppCompatActivity(), SlidingLayout.Listener {
                     lifecycleScope.launch {
                         if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
                             playerFragment?.let {
-                                it.onMinimize()
-                                it.onClose()
+                                it.minimize()
+                                it.close()
                                 closePlayer()
                             }
                             if (prefs.getBoolean(C.SLEEP_TIMER_LOCK, false)) {
@@ -680,8 +702,8 @@ class MainActivity : AppCompatActivity(), SlidingLayout.Listener {
                         } else {
                             withStarted {
                                 playerFragment?.let {
-                                    it.onMinimize()
-                                    it.onClose()
+                                    it.minimize()
+                                    it.close()
                                     closePlayer()
                                 }
                             }

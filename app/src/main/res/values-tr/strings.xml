@@ -84,8 +84,6 @@
     <string name="source_vod_start">Başlangıç: %s</string>
     <string name="source_vod_end">Bitiş: %s</string>
     <string name="stream_ended">Yayın sona erdi</string>
-    <string name="viewers_count">%s izleyici</string>
-    <string name="views">%s izlenme</string>
     <string name="download_pending">Beklemede</string>
     <string name="downloading_progress">İndiriliyor: %d%%</string>
     <string name="pause">Duraklat</string>
@@ -181,7 +179,6 @@
     <string name="timestamps">Zaman damgalarını göster</string>
     <string name="timestamp_format">Zaman damgası formatı</string>
     <string name="created_at">Oluşturulma tarihi: %s</string>
-    <string name="followers">%s takipçi</string>
     <string name="user_partner">Partner</string>
     <string name="user_affiliate">İştirak</string>
     <string name="user_staff">Çalışan</string>
@@ -397,7 +394,6 @@
     <string name="followed_games">Takip edilen oyunlar</string>
     <string name="irc_msgid_highlighted_message">Vurgulanan mesaj</string>
     <string name="irc_msgid_announcement">Duyuru</string>
-    <string name="debug_secondview">Uygulama içinde hareketli PIP</string>
     <string name="add_bookmark">Yer işareti ekle</string>
     <string name="show_vod_time_left">Yer imli yayın tekrarlarında kalan süreyi göster</string>
     <string name="vod_time_left">Otomatik silinmesine %s kaldı</string>
@@ -715,4 +711,18 @@
     <string name="save_filters">Save filters</string>
     <string name="delete_filter_message">Are you sure you want to delete this filter?</string>
     <string name="use_custom_playback_service">Use custom playback service</string>
+    <string name="move_player_freely">Move minimized player freely</string>
+    <string name="store_recent_searches">Store recent searches</string>
+    <string name="delete_recent_searches">Delete recent searches</string>
+    <string name="delete_recent_searches_message">Are you sure you want to delete all recent searches?</string>
+    <string name="deletion_date">Deletion date</string>
+    <string name="creation_date">Creation date</string>
+    <string name="saved_date">Saved date</string>
+    <string name="about">About</string>
+    <string name="team">Team: %s</string>
+    <string name="owner">Owner: %s</string>
+    <string name="use_background_audio_locked">Play audio in the background when locking the screen</string>
+    <string name="use_background_audio_pip_closed">Play audio in the background when closing PiP</string>
+    <string name="use_background_audio_pip_locked">Play audio in the background when locking the screen in PiP mode</string>
+    <string name="old_username">Old name: %s</string>
 </resources>
