@@ -1,101 +1,97 @@
 package com.github.andreyasadchy.xtra.ui.settings
 
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInstaller
 import android.net.Uri
 import android.net.http.HttpEngine
-import android.net.http.UrlResponseInfo
-import android.os.Build
-import android.os.ext.SdkExtensions
 import android.provider.DocumentsContract
 import android.util.JsonReader
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.core.net.toUri
 import androidx.core.os.LocaleListCompat
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.sqlite.db.SimpleSQLiteQuery
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import com.github.andreyasadchy.xtra.XtraApp
 import com.github.andreyasadchy.xtra.db.AppDatabase
 import com.github.andreyasadchy.xtra.model.ui.OfflineVideo
-import com.github.andreyasadchy.xtra.repository.GraphQLRepository
-import com.github.andreyasadchy.xtra.repository.HelixRepository
-import com.github.andreyasadchy.xtra.repository.NotificationUsersRepository
-import com.github.andreyasadchy.xtra.repository.OfflineRepository
+import com.github.andreyasadchy.xtra.repository.NotificationsRepository
+import com.github.andreyasadchy.xtra.repository.OfflineVideosRepository
 import com.github.andreyasadchy.xtra.repository.PlayerRepository
-import com.github.andreyasadchy.xtra.repository.RecentSearchRepository
-import com.github.andreyasadchy.xtra.repository.ShownNotificationsRepository
+import com.github.andreyasadchy.xtra.repository.RecentSearchesRepository
 import com.github.andreyasadchy.xtra.ui.main.LiveNotificationWorker
 import com.github.andreyasadchy.xtra.ui.main.MainActivity
 import com.github.andreyasadchy.xtra.util.C
-import com.github.andreyasadchy.xtra.util.HttpEngineUtils
-import com.github.andreyasadchy.xtra.util.TwitchApiHelper
-import com.github.andreyasadchy.xtra.util.getByteArrayCronetCallback
+import com.github.andreyasadchy.xtra.util.NetworkUtils
+import com.github.andreyasadchy.xtra.util.NetworkUtils.executeAsync
 import com.github.andreyasadchy.xtra.util.m3u8.PlaylistUtils
 import com.github.andreyasadchy.xtra.util.m3u8.Segment
-import dagger.Lazy
-import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.chromium.net.CronetEngine
-import org.chromium.net.apihelpers.RedirectHandlers
-import org.chromium.net.apihelpers.UrlRequestCallbacks
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.TimeUnit
-import javax.inject.Inject
-import kotlin.coroutines.suspendCoroutine
 import kotlin.math.max
 import kotlin.system.exitProcess
+import kotlin.time.Instant
 
-@HiltViewModel
-class SettingsViewModel @Inject constructor(
-    @param:ApplicationContext private val applicationContext: Context,
+class SettingsViewModel(
+    private val applicationContext: Context,
     private val playerRepository: PlayerRepository,
-    private val offlineRepository: OfflineRepository,
-    private val recentSearchRepository: RecentSearchRepository,
-    private val shownNotificationsRepository: ShownNotificationsRepository,
-    private val notificationUsersRepository: NotificationUsersRepository,
-    private val graphQLRepository: GraphQLRepository,
-    private val helixRepository: HelixRepository,
+    private val offlineVideosRepository: OfflineVideosRepository,
+    private val recentSearchesRepository: RecentSearchesRepository,
+    private val notificationsRepository: NotificationsRepository,
     private val appDatabase: AppDatabase,
-    private val httpEngine: Lazy<HttpEngine>?,
-    private val cronetEngine: Lazy<CronetEngine>?,
-    private val cronetExecutor: ExecutorService,
-    private val okHttpClient: OkHttpClient,
+    private val httpEngine: Lazy<HttpEngine?>,
+    private val cronetEngine: Lazy<CronetEngine?>,
+    private val cronetExecutor: Lazy<ExecutorService>,
+    private val okHttpClient: Lazy<OkHttpClient>,
     private val json: Json,
 ) : ViewModel() {
 
     val updateUrl = MutableSharedFlow<String?>()
+    var updateSize: Long? = null
+    var updateJob: Job? = null
+    val updateProgress = MutableSharedFlow<Int>()
+    val closeUpdateDialog = MutableSharedFlow<Boolean>()
 
     fun deletePositions() {
         viewModelScope.launch {
             playerRepository.deleteVideoPositions()
-            offlineRepository.deletePositions()
+            offlineVideosRepository.deletePositions()
         }
     }
 
     fun deleteRecentSearches() {
         viewModelScope.launch {
-            recentSearchRepository.deleteAll()
+            recentSearchesRepository.deleteAll()
         }
     }
 
@@ -111,7 +107,7 @@ class SettingsViewModel @Inject constructor(
                         files.filter { !it.name.endsWith(".json") }.forEach { file ->
                             if (file.isDirectory) {
                                 file.listFiles()?.filter { it.name.endsWith(".m3u8") }?.forEach { playlistFile ->
-                                        val existingVideo = offlineRepository.getVideoByUrl(playlistFile.path)
+                                        val existingVideo = offlineVideosRepository.getByUrl(playlistFile.path)
                                         if (existingVideo == null) {
                                             val playlist = FileInputStream(playlistFile).use {
                                                 PlaylistUtils.parseMediaPlaylist(it)
@@ -173,7 +169,7 @@ class SettingsViewModel @Inject constructor(
 
                                                 }
                                             }
-                                            offlineRepository.saveVideo(
+                                            offlineVideosRepository.save(
                                                 OfflineVideo(
                                                     url = playlistFile.path,
                                                     name = if (!title.isNullOrBlank()) title else Uri.decode(file.name),
@@ -196,7 +192,7 @@ class SettingsViewModel @Inject constructor(
                                         }
                                     }
                             } else if (file.isFile && (file.name.endsWith(".mp4") || file.name.endsWith(".ts"))) {
-                                val existingVideo = offlineRepository.getVideoByUrl(file.path)
+                                val existingVideo = offlineVideosRepository.getByUrl(file.path)
                                 if (existingVideo == null) {
                                     val fileName = file.name.removeSuffix(".mp4").removeSuffix(".ts")
                                     val chatFile = chatFiles[fileName]
@@ -244,7 +240,7 @@ class SettingsViewModel @Inject constructor(
 
                                         }
                                     }
-                                    offlineRepository.saveVideo(
+                                    offlineVideosRepository.save(
                                         OfflineVideo(
                                             url = file.path,
                                             name = if (!title.isNullOrBlank()) title else Uri.decode(fileName),
@@ -277,27 +273,42 @@ class SettingsViewModel @Inject constructor(
             updateUrl.emit(
                 try {
                     val response = when {
-                        networkLibrary == "HttpEngine" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S) >= 7 && httpEngine != null -> {
-                            val response = suspendCoroutine<Pair<UrlResponseInfo, ByteArray>> { continuation ->
-                                httpEngine.get().newUrlRequestBuilder(url, cronetExecutor, HttpEngineUtils.byteArrayUrlCallback(continuation)).build().start()
-                            }
-                            json.decodeFromString<JsonObject>(String(response.second))
-                        }
-                        networkLibrary == "Cronet" && cronetEngine != null -> {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                                val request = UrlRequestCallbacks.forStringBody(RedirectHandlers.alwaysFollow())
-                                cronetEngine.get().newUrlRequestBuilder(url, request.callback, cronetExecutor).build().start()
-                                val response = request.future.get().responseBody as String
-                                json.decodeFromString<JsonObject>(response)
-                            } else {
-                                val response = suspendCoroutine<Pair<org.chromium.net.UrlResponseInfo, ByteArray>> { continuation ->
-                                    cronetEngine.get().newUrlRequestBuilder(url, getByteArrayCronetCallback(continuation), cronetExecutor).build().start()
+                        networkLibrary == C.HTTP_ENGINE && httpEngine.value != null -> @SuppressLint("NewApi") {
+                            val response = suspendCancellableCoroutine { continuation ->
+                                val timeout = NetworkUtils.HttpEngineTimeout()
+                                val request = httpEngine.value!!.newUrlRequestBuilder(
+                                    url,
+                                    cronetExecutor.value,
+                                    NetworkUtils.ByteArrayUrlCallback(continuation, timeout)
+                                ).build()
+                                timeout.start(request, continuation)
+                                request.start()
+                                continuation.invokeOnCancellation {
+                                    request.cancel()
+                                    timeout.stop()
                                 }
-                                json.decodeFromString<JsonObject>(String(response.second))
                             }
+                            json.decodeFromString<JsonObject>(response.body.decodeToString())
+                        }
+                        networkLibrary == C.CRONET && cronetEngine.value != null -> {
+                            val response = suspendCancellableCoroutine { continuation ->
+                                val timeout = NetworkUtils.CronetTimeout()
+                                val request = cronetEngine.value!!.newUrlRequestBuilder(
+                                    url,
+                                    NetworkUtils.ByteArrayCronetCallback(continuation, timeout),
+                                    cronetExecutor.value
+                                ).build()
+                                timeout.start(request, continuation)
+                                request.start()
+                                continuation.invokeOnCancellation {
+                                    request.cancel()
+                                    timeout.stop()
+                                }
+                            }
+                            json.decodeFromString<JsonObject>(response.body.decodeToString())
                         }
                         else -> {
-                            okHttpClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
+                            okHttpClient.value.newCall(Request.Builder().url(url).build()).executeAsync().use { response ->
                                 json.decodeFromString<JsonObject>(response.body.string())
                             }
                         }
@@ -305,8 +316,11 @@ class SettingsViewModel @Inject constructor(
                     response["assets"]?.jsonArray?.find {
                         it.jsonObject.getValue("content_type").jsonPrimitive.contentOrNull == "application/vnd.android.package-archive"
                     }?.jsonObject?.let { obj ->
-                        obj.getValue("updated_at").jsonPrimitive.contentOrNull?.let { TwitchApiHelper.parseIso8601DateUTC(it) }?.let {
+                        obj.getValue("updated_at").jsonPrimitive.contentOrNull?.let {
+                            Instant.parseOrNull(it)?.toEpochMilliseconds()?.takeIf { ms -> ms > 0 }
+                        }?.let {
                             if (it > lastChecked) {
+                                updateSize = obj["size"]?.jsonPrimitive?.longOrNull
                                 obj.getValue("browser_download_url").jsonPrimitive.contentOrNull
                             } else null
                         }
@@ -319,36 +333,56 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun downloadUpdate(networkLibrary: String?, url: String) {
-        viewModelScope.launch(Dispatchers.IO) {
+        updateJob = viewModelScope.launch(Dispatchers.IO) {
             try {
+                val progressListener = NetworkUtils.ProgressListener { bytesRead ->
+                    runBlocking {
+                        updateProgress.emit(bytesRead)
+                    }
+                }
                 val response = when {
-                    networkLibrary == "HttpEngine" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S) >= 7 && httpEngine != null -> {
-                        val response = suspendCoroutine<Pair<UrlResponseInfo, ByteArray>> { continuation ->
-                            httpEngine.get().newUrlRequestBuilder(url, cronetExecutor, HttpEngineUtils.byteArrayUrlCallback(continuation)).build().start()
+                    networkLibrary == C.HTTP_ENGINE && httpEngine.value != null -> @SuppressLint("NewApi") {
+                        val response = suspendCancellableCoroutine { continuation ->
+                            val timeout = NetworkUtils.HttpEngineTimeout()
+                            val request = httpEngine.value!!.newUrlRequestBuilder(
+                                url,
+                                cronetExecutor.value,
+                                NetworkUtils.ByteArrayUrlCallback(continuation, timeout, progressListener)
+                            ).build()
+                            timeout.start(request, continuation)
+                            request.start()
+                            continuation.invokeOnCancellation {
+                                request.cancel()
+                                timeout.stop()
+                            }
                         }
-                        if (response.first.httpStatusCode in 200..299) {
-                            response.second
+                        if (response.info.httpStatusCode in 200..299) {
+                            response.body
                         } else null
                     }
-                    networkLibrary == "Cronet" && cronetEngine != null -> {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                            val request = UrlRequestCallbacks.forByteArrayBody(RedirectHandlers.alwaysFollow())
-                            cronetEngine.get().newUrlRequestBuilder(url, request.callback, cronetExecutor).build().start()
-                            val response = request.future.get()
-                            if (response.urlResponseInfo.httpStatusCode in 200..299) {
-                                response.responseBody as ByteArray
-                            } else null
-                        } else {
-                            val response = suspendCoroutine<Pair<org.chromium.net.UrlResponseInfo, ByteArray>> { continuation ->
-                                cronetEngine.get().newUrlRequestBuilder(url, getByteArrayCronetCallback(continuation), cronetExecutor).build().start()
+                    networkLibrary == C.CRONET && cronetEngine.value != null -> {
+                        val response = suspendCancellableCoroutine { continuation ->
+                            val timeout = NetworkUtils.CronetTimeout()
+                            val request = cronetEngine.value!!.newUrlRequestBuilder(
+                                url,
+                                NetworkUtils.ByteArrayCronetCallback(continuation, timeout, progressListener),
+                                cronetExecutor.value
+                            ).build()
+                            timeout.start(request, continuation)
+                            request.start()
+                            continuation.invokeOnCancellation {
+                                request.cancel()
+                                timeout.stop()
                             }
-                            if (response.first.httpStatusCode in 200..299) {
-                                response.second
-                            } else null
                         }
+                        if (response.info.httpStatusCode in 200..299) {
+                            response.body
+                        } else null
                     }
                     else -> {
-                        okHttpClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
+                        okHttpClient.value.newBuilder().apply {
+                            addNetworkInterceptor(NetworkUtils.ProgressInterceptor(progressListener))
+                        }.build().newCall(Request.Builder().url(url).build()).executeAsync().use { response ->
                             if (response.isSuccessful) {
                                 response.body.bytes()
                             } else null
@@ -379,6 +413,7 @@ class SettingsViewModel @Inject constructor(
             } catch (e: Exception) {
 
             }
+            closeUpdateDialog.emit(true)
         }
     }
 
@@ -454,7 +489,7 @@ class SettingsViewModel @Inject constructor(
     fun toggleNotifications(enabled: Boolean, networkLibrary: String?, gqlHeaders: Map<String, String>, helixHeaders: Map<String, String>) {
         viewModelScope.launch(Dispatchers.IO) {
             if (enabled) {
-                shownNotificationsRepository.getNewStreams(notificationUsersRepository, networkLibrary, gqlHeaders, graphQLRepository, helixHeaders, helixRepository)
+                notificationsRepository.getNewStreams(networkLibrary, gqlHeaders, helixHeaders)
                 WorkManager.getInstance(applicationContext).enqueueUniquePeriodicWork(
                     "live_notifications",
                     ExistingPeriodicWorkPolicy.CANCEL_AND_REENQUEUE,
@@ -469,6 +504,16 @@ class SettingsViewModel @Inject constructor(
                 )
             } else {
                 WorkManager.getInstance(applicationContext).cancelUniqueWork("live_notifications")
+            }
+        }
+    }
+
+    companion object {
+        val SettingsViewModelFactory = viewModelFactory {
+            initializer {
+                val application = (this[APPLICATION_KEY] as XtraApp)
+                val xtraModule = application.xtraModule
+                SettingsViewModel(application.applicationContext, xtraModule.playerRepository, xtraModule.offlineVideosRepository, xtraModule.recentSearchesRepository, xtraModule.notificationsRepository, xtraModule.database, xtraModule.httpEngine, xtraModule.cronetEngine, xtraModule.cronetExecutor, xtraModule.okHttpClient, xtraModule.json)
             }
         }
     }

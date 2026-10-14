@@ -2,116 +2,124 @@ package com.github.andreyasadchy.xtra.util.chat
 
 import com.github.andreyasadchy.xtra.util.WebSocket
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Timer
 import javax.net.ssl.X509TrustManager
 import kotlin.concurrent.schedule
 import kotlin.random.Random
 
 class ChatReadWebSocket(
-    private val loggedIn: Boolean,
-    private val channelName: String,
-    private val onConnect: (() -> Unit)? = null,
-    private val onDisconnect: ((String, String) -> Unit)? = null,
-    private val onChatMessage: ((String, Boolean) -> Unit)? = null,
-    private val onClearMessage: ((String) -> Unit)? = null,
-    private val onClearChat: ((String) -> Unit)? = null,
-    private val onNotice: ((String) -> Unit)? = null,
-    private val onRoomState: ((String) -> Unit)? = null,
-    private val trustManager: X509TrustManager?,
-    private val coroutineScope: CoroutineScope,
+    private val channelLogin: String,
+    private val showGifMessages: Boolean,
+    private val trustManager: Lazy<X509TrustManager>,
+    private val listener: Listener,
 ) {
     private var webSocket: WebSocket? = null
-    internal var pingTimer: Timer? = null
-    internal var pongTimer: Timer? = null
-    val isActive: Boolean?
-        get() = webSocket?.isActive
+    private var pingTimer: Timer? = null
+    private var pongTimer: Timer? = null
 
-    fun connect() {
-        webSocket = WebSocket("wss://irc-ws.chat.twitch.tv", trustManager, ChatReadWebSocketListener())
-        coroutineScope.launch {
+    fun connect(coroutineScope: CoroutineScope): Job {
+        webSocket = WebSocket(
+            url = "wss://irc-ws.chat.twitch.tv",
+            trustManager = trustManager,
+            listener = WebSocketListener(),
+            headers = if (showGifMessages) {
+                mapOf("Cookie" to "experiment_overrides={%22experiments%22:{}%2C%22disabled%22:[]}")
+            } else null,
+        )
+        webSocket?.coroutineScope = coroutineScope
+        return coroutineScope.launch(Dispatchers.IO) {
             webSocket?.start()
         }
     }
 
-    suspend fun disconnect() {
+    suspend fun disconnect(job: Job?) = withContext(Dispatchers.IO) {
         pingTimer?.cancel()
         pongTimer?.cancel()
-        webSocket?.stop()
+        job?.cancel()
+        webSocket?.disconnect()
     }
 
-    internal fun startPingTimer() {
+    private suspend fun startPingTimer() = withContext(Dispatchers.IO) {
         pingTimer = Timer().apply {
             schedule(270000) {
-                coroutineScope.launch {
+                webSocket?.coroutineScope?.launch {
                     webSocket?.write("PING")
+                    startPongTimer()
                 }
-                startPongTimer()
             }
         }
     }
 
-    private fun startPongTimer() {
+    private suspend fun startPongTimer() = withContext(Dispatchers.IO) {
         pongTimer = Timer().apply {
             schedule(10000) {
-                coroutineScope.launch {
+                webSocket?.coroutineScope?.launch {
                     webSocket?.disconnect()
                 }
             }
         }
     }
 
-    private inner class ChatReadWebSocketListener: WebSocket.Listener {
-        override fun onOpen(webSocket: WebSocket) {
-            coroutineScope.launch {
-                webSocket.write("CAP REQ :twitch.tv/tags twitch.tv/commands")
-                webSocket.write("NICK justinfan${Random.nextInt(1000, 10000)}")
-                webSocket.write("JOIN #$channelName")
-            }
-            onConnect?.invoke()
+    interface Listener {
+        suspend fun onConnect() {}
+        suspend fun onChatMessage(message: ChatUtils.IRCMessage, userNotice: Boolean) {}
+        suspend fun onClearMessage(message: ChatUtils.IRCMessage) {}
+        suspend fun onClearChat(message: ChatUtils.IRCMessage) {}
+        suspend fun onNotice(message: ChatUtils.IRCMessage) {}
+        suspend fun onRoomState(message: ChatUtils.IRCMessage) {}
+        suspend fun onUserState(message: ChatUtils.IRCMessage) {}
+        suspend fun onDisconnect(message: String, fullMsg: String?) {}
+    }
+
+    private inner class WebSocketListener : WebSocket.Listener {
+        override suspend fun onConnect(webSocket: WebSocket) {
+            webSocket.write("CAP REQ :twitch.tv/tags twitch.tv/commands")
+            webSocket.write("NICK justinfan${Random.nextInt(1000, 10000)}")
+            webSocket.write("JOIN #$channelLogin")
+            listener.onConnect()
             pingTimer?.cancel()
             pongTimer?.cancel()
             startPingTimer()
         }
 
-        override fun onMessage(webSocket: WebSocket, message: String) {
+        override suspend fun onMessage(webSocket: WebSocket, message: String) {
             message.removeSuffix("\r\n").split("\r\n").forEach {
-                it.run {
-                    when {
-                        contains("PRIVMSG") -> onChatMessage?.invoke(this, false)
-                        contains("USERNOTICE") -> onChatMessage?.invoke(this, true)
-                        contains("CLEARMSG") -> onClearMessage?.invoke(this)
-                        contains("CLEARCHAT") -> onClearChat?.invoke(this)
-                        contains("NOTICE") -> {
-                            if (!loggedIn) {
-                                onNotice?.invoke(this)
-                            }
-                        }
-                        contains("ROOMSTATE") -> onRoomState?.invoke(this)
-                        startsWith("PING") -> {
-                            coroutineScope.launch {
-                                webSocket.write("PONG")
-                            }
-                        }
-                        startsWith("PONG") -> {
-                            pingTimer?.cancel()
-                            pongTimer?.cancel()
-                            startPingTimer()
-                        }
-                        startsWith("RECONNECT") -> {
-                            pingTimer?.cancel()
-                            pongTimer?.cancel()
-                            coroutineScope.launch {
-                                webSocket.disconnect()
-                            }
+                when {
+                    it.startsWith("PING") -> {
+                        webSocket.write("PONG")
+                    }
+                    it.startsWith("PONG") -> {
+                        pingTimer?.cancel()
+                        pongTimer?.cancel()
+                        startPingTimer()
+                    }
+                    it.startsWith("RECONNECT") -> {
+                        pingTimer?.cancel()
+                        pongTimer?.cancel()
+                        webSocket.disconnect()
+                    }
+                    else -> {
+                        val ircMessage = ChatUtils.parseIRCMessage(it)
+                        when (ircMessage.command) {
+                            "PRIVMSG" -> listener.onChatMessage(ircMessage, false)
+                            "USERNOTICE" -> listener.onChatMessage(ircMessage, true)
+                            "CLEARMSG" -> listener.onClearMessage(ircMessage)
+                            "CLEARCHAT" -> listener.onClearChat(ircMessage)
+                            "NOTICE" -> listener.onNotice(ircMessage)
+                            "ROOMSTATE" -> listener.onRoomState(ircMessage)
+                            "USERSTATE" -> listener.onUserState(ircMessage)
                         }
                     }
                 }
             }
         }
 
-        override fun onFailure(webSocket: WebSocket, throwable: Throwable) {
-            onDisconnect?.invoke(throwable.toString(), throwable.stackTraceToString())
+        override suspend fun onDisconnect(webSocket: WebSocket, message: String, fullMsg: String?) {
+            listener.onDisconnect(message, fullMsg)
         }
     }
 }

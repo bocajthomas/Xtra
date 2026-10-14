@@ -5,8 +5,8 @@ import com.github.andreyasadchy.xtra.model.chat.ChatMessage
 import com.github.andreyasadchy.xtra.model.chat.Poll
 import com.github.andreyasadchy.xtra.model.chat.Prediction
 import com.github.andreyasadchy.xtra.model.chat.Raid
-import com.github.andreyasadchy.xtra.util.TwitchApiHelper
 import org.json.JSONObject
+import kotlin.time.Instant
 
 object PubSubUtils {
     fun parsePlaybackMessage(message: JSONObject): PlaybackMessage? {
@@ -36,6 +36,7 @@ object PubSubUtils {
         val defaultImage = reward?.optJSONObject("default_image")
         val input = if (redemption?.isNull("user_input") == false) redemption.optString("user_input").takeIf { it.isNotBlank() } else null
         return ChatMessage(
+            type = ChatMessage.USER_MESSAGE,
             userId = if (user?.isNull("id") == false) user.optString("id").takeIf { it.isNotBlank() } else null,
             userLogin = if (user?.isNull("login") == false) user.optString("login").takeIf { it.isNotBlank() } else null,
             userName = if (user?.isNull("display_name") == false) user.optString("display_name").takeIf { it.isNotBlank() } else null,
@@ -51,18 +52,22 @@ object PubSubUtils {
                 url4x = if (rewardImage?.isNull("url_4x") == false) { rewardImage.optString("url_4x").takeIf { it.isNotBlank() } } else { null }
                     ?: if (defaultImage?.isNull("url_4x") == false) defaultImage.optString("url_4x").takeIf { it.isNotBlank() } else null,
             ),
-            timestamp = if (messageData?.isNull("timestamp") == false) messageData.optString("timestamp").takeIf { it.isNotBlank() }?.let { TwitchApiHelper.parseIso8601DateUTC(it) } else null,
+            timestamp = if (messageData?.isNull("timestamp") == false) messageData.optString("timestamp").takeIf { it.isNotBlank() }?.let { Instant.parseOrNull(it)?.toEpochMilliseconds()?.takeIf { ms -> ms > 0 } } else null,
             fullMsg = message.toString(),
         )
     }
 
-    fun parsePointsEarned(message: JSONObject): PointsEarned {
+    fun parsePointsEarned(message: JSONObject): Pair<PointsEarned, String?> {
         val messageData = message.optJSONObject("data")
+        val messageChannelId = messageData?.optString("channel_id")
         val pointGain = messageData?.optJSONObject("point_gain")
-        return PointsEarned(
-            pointsGained = pointGain?.optInt("total_points"),
-            timestamp = if (messageData?.isNull("timestamp") == false) messageData.optString("timestamp").takeIf { it.isNotBlank() }?.let { TwitchApiHelper.parseIso8601DateUTC(it) } else null,
-            fullMsg = message.toString()
+        return Pair(
+            PointsEarned(
+                pointsGained = pointGain?.optInt("total_points"),
+                timestamp = if (messageData?.isNull("timestamp") == false) messageData.optString("timestamp").takeIf { it.isNotBlank() }?.let { Instant.parseOrNull(it)?.toEpochMilliseconds()?.takeIf { ms -> ms > 0 } } else null,
+                fullMsg = message.toString()
+            ),
+            messageChannelId
         )
     }
 
@@ -74,7 +79,7 @@ object PubSubUtils {
                 targetId = if (!raid.isNull("target_id")) raid.optString("target_id").takeIf { it.isNotBlank() } else null,
                 targetLogin = if (!raid.isNull("target_login")) raid.optString("target_login").takeIf { it.isNotBlank() } else null,
                 targetName = if (!raid.isNull("target_display_name")) raid.optString("target_display_name").takeIf { it.isNotBlank() } else null,
-                targetProfileImage = if (!raid.isNull("target_profile_image")) raid.optString("target_profile_image").takeIf { it.isNotBlank() }?.replace("profile_image-%s", "profile_image-300x300") else null,
+                targetImageURL = if (!raid.isNull("target_profile_image")) raid.optString("target_profile_image").takeIf { it.isNotBlank() }?.replace("profile_image-%s", "profile_image-300x300") else null,
                 viewerCount = raid.optInt("viewer_count"),
                 openStream = openStream
             )
@@ -136,7 +141,7 @@ object PubSubUtils {
         return if (prediction != null) {
             Prediction(
                 id = if (!prediction.isNull("id")) prediction.optString("id").takeIf { it.isNotBlank() } else null,
-                createdAt = if (!prediction.isNull("created_at")) prediction.optString("created_at").takeIf { it.isNotBlank() }?.let { TwitchApiHelper.parseIso8601DateUTC(it) } else null,
+                createdAt = if (!prediction.isNull("created_at")) prediction.optString("created_at").takeIf { it.isNotBlank() }?.let { Instant.parseOrNull(it)?.toEpochMilliseconds()?.takeIf { ms -> ms > 0 } } else null,
                 outcomes = outcomesList,
                 predictionWindowSeconds = if (!prediction.isNull("prediction_window_seconds")) prediction.optInt("prediction_window_seconds") else null,
                 status = if (!prediction.isNull("status")) prediction.optString("status").takeIf { it.isNotBlank() } else null,

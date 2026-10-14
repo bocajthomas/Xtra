@@ -9,11 +9,13 @@ import android.text.Spanned
 import android.text.method.LinkMovementMethod
 import android.text.style.ClickableSpan
 import android.text.style.StyleSpan
+import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.core.content.res.use
 import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
@@ -30,26 +32,23 @@ import androidx.navigation.fragment.navArgs
 import com.github.andreyasadchy.xtra.R
 import com.github.andreyasadchy.xtra.databinding.FragmentAboutBinding
 import com.github.andreyasadchy.xtra.ui.channel.ChannelPagerFragmentArgs
+import com.github.andreyasadchy.xtra.ui.channel.about.ChannelAboutViewModel.Companion.ChannelAboutViewModelFactory
 import com.github.andreyasadchy.xtra.ui.common.BaseNetworkFragment
 import com.github.andreyasadchy.xtra.ui.common.IntegrityDialog
+import com.github.andreyasadchy.xtra.ui.main.MainActivity
 import com.github.andreyasadchy.xtra.ui.team.TeamFragmentDirections
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
-import com.github.andreyasadchy.xtra.util.convertDpToPixels
 import com.github.andreyasadchy.xtra.util.prefs
-import com.github.andreyasadchy.xtra.util.toast
-import com.github.andreyasadchy.xtra.util.visible
-import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
-@AndroidEntryPoint
-class ChannelAboutFragment : BaseNetworkFragment(), IntegrityDialog.CallbackListener {
+class ChannelAboutFragment : BaseNetworkFragment(), IntegrityDialog.Listener {
 
     private var _binding: FragmentAboutBinding? = null
     private val binding get() = _binding!!
     private val args: ChannelPagerFragmentArgs by navArgs()
-    private val viewModel: ChannelAboutViewModel by viewModels()
+    private val viewModel: ChannelAboutViewModel by viewModels { ChannelAboutViewModelFactory }
     private var panelAdapter: ChannelPanelAdapter? = null
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -61,6 +60,13 @@ class ChannelAboutFragment : BaseNetworkFragment(), IntegrityDialog.CallbackList
         super.onViewCreated(view, savedInstanceState)
         panelAdapter = ChannelPanelAdapter(this@ChannelAboutFragment)
         binding.recyclerView.adapter = panelAdapter
+        viewLifecycleOwner.lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.integrity.collect {
+                    (requireActivity() as? MainActivity)?.getNewIntegrityToken(it, childFragmentManager)
+                }
+            }
+        }
         ViewCompat.setOnApplyWindowInsetsListener(view) { _, windowInsets ->
             if (activity?.findViewById<LinearLayout>(R.id.navBarContainer)?.isVisible == false) {
                 val insets = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -76,7 +82,7 @@ class ChannelAboutFragment : BaseNetworkFragment(), IntegrityDialog.CallbackList
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
                     viewModel.description.collectLatest {
                         if (!it.isNullOrBlank()) {
-                            description.visible()
+                            description.visibility = View.VISIBLE
                             description.text = it
                         }
                     }
@@ -86,7 +92,7 @@ class ChannelAboutFragment : BaseNetworkFragment(), IntegrityDialog.CallbackList
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
                     viewModel.socialMedias.collectLatest { result ->
                         if (result != null) {
-                            socialMediaList.visible()
+                            socialMediaList.visibility = View.VISIBLE
                             socialMediaList.removeAllViews()
                             result.forEach {
                                 val title = it.first
@@ -94,7 +100,13 @@ class ChannelAboutFragment : BaseNetworkFragment(), IntegrityDialog.CallbackList
                                 if (!title.isNullOrBlank()) {
                                     socialMediaList.addView(
                                         TextView(requireContext()).apply {
-                                            val spannableString = SpannableString(title)
+                                            val host = url?.toUri()?.host?.removePrefix("www.")
+                                            val string = if (host != null) {
+                                                "$title ($host)"
+                                            } else {
+                                                title
+                                            }
+                                            val spannableString = SpannableString(string)
                                             spannableString.setSpan(StyleSpan(Typeface.BOLD), 0, title.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                                             if (url != null) {
                                                 spannableString.setSpan(object : ClickableSpan() {
@@ -103,12 +115,12 @@ class ChannelAboutFragment : BaseNetworkFragment(), IntegrityDialog.CallbackList
                                                             val intent = Intent(Intent.ACTION_VIEW, url.toUri()).apply {
                                                                 addCategory(Intent.CATEGORY_BROWSABLE)
                                                             }
-                                                            requireContext().startActivity(intent)
+                                                            startActivity(intent)
                                                         } catch (e: ActivityNotFoundException) {
-                                                            requireContext().toast(R.string.no_browser_found)
+                                                            Toast.makeText(requireContext(), R.string.no_browser_found, Toast.LENGTH_LONG).show()
                                                         }
                                                     }
-                                                }, 0, title.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                                                }, 0, string.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                                                 movementMethod = LinkMovementMethod.getInstance()
                                             }
                                             text = spannableString
@@ -119,7 +131,8 @@ class ChannelAboutFragment : BaseNetworkFragment(), IntegrityDialog.CallbackList
                                             context.obtainStyledAttributes(intArrayOf(com.google.android.material.R.attr.textAppearanceBodyMedium)).use {
                                                 TextViewCompat.setTextAppearance(this, it.getResourceId(0, 0))
                                             }
-                                            setPadding(0, 0, 0, context.convertDpToPixels(5f))
+                                            val padding = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 5f, resources.displayMetrics).toInt()
+                                            setPadding(0, 0, 0, padding)
                                         }
                                     )
                                 }
@@ -135,8 +148,8 @@ class ChannelAboutFragment : BaseNetworkFragment(), IntegrityDialog.CallbackList
                             val name = result.first
                             val displayName = result.second
                             if (!displayName.isNullOrBlank()) {
-                                team.visible()
-                                val string = requireContext().getString(R.string.team, displayName)
+                                team.visibility = View.VISIBLE
+                                val string = getString(R.string.team, displayName)
                                 val index = string.indexOf(displayName)
                                 val spannableString = SpannableString(string)
                                 spannableString.setSpan(StyleSpan(Typeface.BOLD), index, index + displayName.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
@@ -162,8 +175,8 @@ class ChannelAboutFragment : BaseNetworkFragment(), IntegrityDialog.CallbackList
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
                     viewModel.originalName.collectLatest {
                         if (!it.isNullOrBlank()) {
-                            originalName.visible()
-                            originalName.text = requireContext().getString(R.string.old_username, it)
+                            originalName.visibility = View.VISIBLE
+                            originalName.text = getString(R.string.old_username, it)
                         }
                     }
                 }
@@ -179,7 +192,7 @@ class ChannelAboutFragment : BaseNetworkFragment(), IntegrityDialog.CallbackList
         viewModel.loadAbout(
             channelId = args.channelId,
             channelLogin = args.channelLogin,
-            networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+            networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
             gqlHeaders = TwitchApiHelper.getGQLHeaders(requireContext()),
             enableIntegrity = requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
         )
@@ -189,25 +202,23 @@ class ChannelAboutFragment : BaseNetworkFragment(), IntegrityDialog.CallbackList
         viewModel.loadAbout(
             channelId = args.channelId,
             channelLogin = args.channelLogin,
-            networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+            networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
             gqlHeaders = TwitchApiHelper.getGQLHeaders(requireContext()),
             enableIntegrity = requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
         )
     }
 
-    override fun onIntegrityDialogCallback(callback: String?) {
-        (parentFragment as? IntegrityDialog.CallbackListener)?.onIntegrityDialogCallback("refresh")
-        if (callback == "refresh") {
-            viewLifecycleOwner.lifecycleScope.launch {
-                repeatOnLifecycle(Lifecycle.State.STARTED) {
-                    viewModel.loadAbout(
-                        channelId = args.channelId,
-                        channelLogin = args.channelLogin,
-                        networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
-                        gqlHeaders = TwitchApiHelper.getGQLHeaders(requireContext()),
-                        enableIntegrity = requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
-                    )
-                }
+    override fun onIntegrityTokenLoaded(callback: String?) {
+        (parentFragment as? IntegrityDialog.Listener)?.onIntegrityTokenLoaded("refresh")
+        when (callback) {
+            "refresh" -> {
+                viewModel.loadAbout(
+                    channelId = args.channelId,
+                    channelLogin = args.channelLogin,
+                    networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                    gqlHeaders = TwitchApiHelper.getGQLHeaders(requireContext()),
+                    enableIntegrity = requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
+                )
             }
         }
     }

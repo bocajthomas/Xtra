@@ -29,6 +29,7 @@ import com.github.andreyasadchy.xtra.model.ui.Tag
 import com.github.andreyasadchy.xtra.ui.common.GamesAdapter
 import com.github.andreyasadchy.xtra.ui.common.PagedListFragment
 import com.github.andreyasadchy.xtra.ui.common.Scrollable
+import com.github.andreyasadchy.xtra.ui.games.GamesViewModel.Companion.GamesViewModelFactory
 import com.github.andreyasadchy.xtra.ui.login.LoginActivity
 import com.github.andreyasadchy.xtra.ui.main.MainActivity
 import com.github.andreyasadchy.xtra.ui.search.SearchPagerFragmentDirections
@@ -36,21 +37,17 @@ import com.github.andreyasadchy.xtra.ui.settings.SettingsActivity
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
 import com.github.andreyasadchy.xtra.util.getAlertDialogBuilder
-import com.github.andreyasadchy.xtra.util.gone
 import com.github.andreyasadchy.xtra.util.prefs
 import com.github.andreyasadchy.xtra.util.tokenPrefs
-import com.github.andreyasadchy.xtra.util.visible
-import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
-@AndroidEntryPoint
 class GamesFragment : PagedListFragment(), Scrollable, GamesSortDialog.OnFilter {
 
     private var _binding: FragmentGamesBinding? = null
     private val binding get() = _binding!!
     private val args: GamesFragmentArgs by navArgs()
-    private val viewModel: GamesViewModel by viewModels()
+    private val viewModel: GamesViewModel by viewModels { GamesViewModelFactory }
     private lateinit var pagingAdapter: PagingDataAdapter<Game, out RecyclerView.ViewHolder>
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -134,7 +131,7 @@ class GamesFragment : PagedListFragment(), Scrollable, GamesSortDialog.OnFilter 
                 viewModel.filtersText.value = if (viewModel.tags.isNotEmpty()) {
                     buildString {
                         append(
-                            requireContext().resources.getQuantityString(
+                            resources.getQuantityString(
                                 R.plurals.tags,
                                 viewModel.tags.size,
                                 viewModel.tags.mapNotNull { it.name }.joinToString()
@@ -151,14 +148,14 @@ class GamesFragment : PagedListFragment(), Scrollable, GamesSortDialog.OnFilter 
         }
         val enableScrollTopButton = !args.tags.isNullOrEmpty()
         initializeAdapter(binding.recyclerViewLayout, pagingAdapter, enableScrollTopButton = enableScrollTopButton)
-        if (enableScrollTopButton && requireContext().prefs().getBoolean(C.UI_SCROLLTOP, true)) {
+        if (enableScrollTopButton && requireContext().prefs().getBoolean(C.UI_SCROLL_TOP, true)) {
             binding.recyclerViewLayout.scrollTop.setOnClickListener {
                 scrollToTop()
-                it.gone()
+                it.visibility = View.GONE
             }
         }
         with(binding) {
-            sortBar.root.visible()
+            sortBar.root.visibility = View.VISIBLE
             sortBar.root.setOnClickListener {
                 val tags = viewModel.tags.mapNotNull { tag ->
                     if (tag.id != null && tag.name != null) {
@@ -170,15 +167,15 @@ class GamesFragment : PagedListFragment(), Scrollable, GamesSortDialog.OnFilter 
                     tagNames = tags.values.toTypedArray(),
                 ).show(childFragmentManager, null)
             }
-            sortBar.sortText.gone()
+            sortBar.sortText.visibility = View.GONE
             viewLifecycleOwner.lifecycleScope.launch {
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
                     viewModel.filtersText.collectLatest {
                         if (it != null) {
-                            sortBar.filtersText.visible()
+                            sortBar.filtersText.visibility = View.VISIBLE
                             sortBar.filtersText.text = it
                         } else {
-                            sortBar.filtersText.gone()
+                            sortBar.filtersText.visibility = View.GONE
                         }
                     }
                 }
@@ -193,7 +190,7 @@ class GamesFragment : PagedListFragment(), Scrollable, GamesSortDialog.OnFilter 
             viewModel.setFilter(tags)
             viewModel.filtersText.value = buildString {
                 append(
-                    requireContext().resources.getQuantityString(
+                    resources.getQuantityString(
                         R.plurals.tags,
                         viewModel.tags.size,
                         viewModel.tags.mapNotNull { it.name }.joinToString()
@@ -210,7 +207,7 @@ class GamesFragment : PagedListFragment(), Scrollable, GamesSortDialog.OnFilter 
             viewModel.filtersText.value = if (viewModel.tags.isNotEmpty()) {
                 buildString {
                     append(
-                        requireContext().resources.getQuantityString(
+                        resources.getQuantityString(
                             R.plurals.tags,
                             viewModel.tags.size,
                             viewModel.tags.mapNotNull { it.name }.joinToString()
@@ -232,9 +229,11 @@ class GamesFragment : PagedListFragment(), Scrollable, GamesSortDialog.OnFilter 
         pagingAdapter.retry()
     }
 
-    override fun onIntegrityDialogCallback(callback: String?) {
-        if (callback == "refresh") {
-            pagingAdapter.refresh()
+    override fun onIntegrityTokenLoaded(callback: String?) {
+        when (callback) {
+            "refresh" -> {
+                pagingAdapter.refresh()
+            }
         }
     }
 

@@ -2,10 +2,10 @@ package com.github.andreyasadchy.xtra.repository.datasource
 
 import androidx.paging.PagingSource
 import androidx.paging.PagingState
+import com.github.andreyasadchy.xtra.graphql.type.ClipsPeriod
 import com.github.andreyasadchy.xtra.model.ui.Clip
 import com.github.andreyasadchy.xtra.repository.GraphQLRepository
 import com.github.andreyasadchy.xtra.repository.HelixRepository
-import com.github.andreyasadchy.xtra.type.ClipsPeriod
 import com.github.andreyasadchy.xtra.util.C
 import kotlin.math.max
 
@@ -21,7 +21,6 @@ class ChannelClipsDataSource(
     private val helixHeaders: Map<String, String>,
     private val helixRepository: HelixRepository,
     private val enableIntegrity: Boolean,
-    private val apiPref: List<String>,
     private val networkLibrary: String?,
 ) : PagingSource<Int, Clip>() {
     private var api: String? = null
@@ -30,19 +29,22 @@ class ChannelClipsDataSource(
     override suspend fun load(params: LoadParams<Int>): LoadResult<Int, Clip> {
         return if (!offset.isNullOrBlank()) {
             try {
-                loadFromApi(api, params)
+                loadFromApi(params)
             } catch (e: Exception) {
                 LoadResult.Error(e)
             }
         } else {
             try {
-                loadFromApi(apiPref.getOrNull(0), params)
+                api = C.GQL
+                loadFromApi(params)
             } catch (e: Exception) {
                 try {
-                    loadFromApi(apiPref.getOrNull(1), params)
+                    api = C.HELIX
+                    loadFromApi(params)
                 } catch (e: Exception) {
                     try {
-                        loadFromApi(apiPref.getOrNull(2), params)
+                        api = C.GQL_PERSISTED_QUERY
+                        loadFromApi(params)
                     } catch (e: Exception) {
                         LoadResult.Error(e)
                     }
@@ -51,9 +53,8 @@ class ChannelClipsDataSource(
         }
     }
 
-    private suspend fun loadFromApi(apiPref: String?, params: LoadParams<Int>): LoadResult<Int, Clip> {
-        api = apiPref
-        return when (apiPref) {
+    private suspend fun loadFromApi(params: LoadParams<Int>): LoadResult<Int, Clip> {
+        return when (api) {
             C.GQL -> gqlQueryLoad(params)
             C.GQL_PERSISTED_QUERY -> gqlLoad(params)
             C.HELIX -> if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) helixLoad(params) else throw Exception()
@@ -64,7 +65,7 @@ class ChannelClipsDataSource(
     private suspend fun gqlQueryLoad(params: LoadParams<Int>): LoadResult<Int, Clip> {
         val response = graphQLRepository.loadQueryUserClips(networkLibrary, gqlHeaders, channelId, channelLogin.takeIf { channelId.isNullOrBlank() }, gqlQueryPeriod, params.loadSize, offset)
         if (enableIntegrity) {
-            response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
+            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
         }
         val data = response.data!!.user!!
         val items = data.clips!!.edges!!
@@ -75,22 +76,23 @@ class ChannelClipsDataSource(
                     channelId = channelId,
                     channelLogin = data.login,
                     channelName = data.displayName,
-                    videoId = it.video?.id,
-                    vodOffset = if (it.videoOffsetSeconds != null && it.durationSeconds != null) {
-                        max(it.videoOffsetSeconds - it.durationSeconds, 0) // api is returning wrong offset
-                    } else {
-                        it.videoOffsetSeconds
-                    },
+                    channelImageURL = data.profileImageURL,
                     gameId = it.game?.id,
                     gameSlug = it.game?.slug,
                     gameName = it.game?.displayName,
                     title = it.title,
+                    thumbnailURL = it.thumbnailURL,
+                    createdAt = it.createdAt?.toString(),
                     viewCount = it.viewCount,
-                    uploadDate = it.createdAt?.toString(),
-                    duration = it.durationSeconds?.toDouble(),
-                    thumbnailUrl = it.thumbnailURL,
-                    profileImageUrl = data.profileImageURL,
-                    videoAnimatedPreviewURL = it.video?.animatedPreviewURL
+                    durationSeconds = it.durationSeconds,
+                    videoId = it.video?.id,
+                    videoOffsetSeconds = if (it.videoOffsetSeconds != null && it.durationSeconds != null) {
+                        max(it.videoOffsetSeconds - it.durationSeconds, 0) // api is returning wrong offset
+                    } else {
+                        it.videoOffsetSeconds
+                    },
+                    videoCreatedAt = it.video?.createdAt?.toString(),
+                    videoAnimatedPreviewURL = it.video?.animatedPreviewURL,
                 )
             }
         }
@@ -108,7 +110,7 @@ class ChannelClipsDataSource(
     private suspend fun gqlLoad(params: LoadParams<Int>): LoadResult<Int, Clip> {
         val response = graphQLRepository.loadChannelClips(networkLibrary, gqlHeaders, channelLogin, gqlPeriod, params.loadSize, offset)
         if (enableIntegrity) {
-            response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
+            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
         }
         val data = response.data!!.user
         val items = data.clips!!.edges
@@ -119,15 +121,15 @@ class ChannelClipsDataSource(
                     channelId = channelId,
                     channelLogin = it.broadcaster?.login,
                     channelName = it.broadcaster?.displayName,
+                    channelImageURL = it.broadcaster?.profileImageURL,
                     gameId = it.game?.id,
                     gameSlug = it.game?.slug,
                     gameName = it.game?.name,
                     title = it.title,
+                    thumbnailURL = it.thumbnailURL,
+                    createdAt = it.createdAt,
                     viewCount = it.viewCount,
-                    uploadDate = it.createdAt,
-                    duration = it.durationSeconds,
-                    thumbnailUrl = it.thumbnailURL,
-                    profileImageUrl = it.broadcaster?.profileImageURL,
+                    durationSeconds = it.durationSeconds,
                 )
             }
         }
@@ -165,21 +167,21 @@ class ChannelClipsDataSource(
                 channelId = channelId,
                 channelLogin = channelLogin,
                 channelName = it.channelName,
-                videoId = it.videoId,
-                vodOffset = if (it.vodOffset != null && it.duration != null) {
-                    max(it.vodOffset - it.duration.toInt(), 0)
-                } else {
-                    it.vodOffset
-                },
                 gameId = it.gameId,
                 gameName = it.gameId?.let { id ->
                     games.find { game -> game.id == id }?.name
                 },
                 title = it.title,
+                thumbnailURL = it.thumbnailURL,
+                createdAt = it.createdAt,
                 viewCount = it.viewCount,
-                uploadDate = it.createdAt,
-                duration = it.duration,
-                thumbnailUrl = it.thumbnailUrl,
+                durationSeconds = it.duration?.toInt(),
+                videoId = it.videoId,
+                videoOffsetSeconds = if (it.vodOffset != null && it.duration != null) {
+                    max(it.vodOffset - it.duration.toInt(), 0)
+                } else {
+                    it.vodOffset
+                },
             )
         }
         offset = response.pagination?.cursor

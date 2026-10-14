@@ -27,9 +27,8 @@ import com.github.andreyasadchy.xtra.ui.game.GamePagerFragmentDirections
 import com.github.andreyasadchy.xtra.ui.main.MainActivity
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
-import com.github.andreyasadchy.xtra.util.gone
 import com.github.andreyasadchy.xtra.util.prefs
-import com.github.andreyasadchy.xtra.util.visible
+import kotlin.time.Instant
 
 class ClipsAdapter(
     private val fragment: Fragment,
@@ -68,7 +67,10 @@ class ClipsAdapter(
                     root.setOnClickListener {
                         (fragment.activity as MainActivity).startClip(item)
                     }
-                    root.setOnLongClickListener { showDownloadDialog(item); true }
+                    root.setOnLongClickListener {
+                        showDownloadDialog(item)
+                        true
+                    }
                     fragment.requireContext().imageLoader.enqueue(
                         ImageRequest.Builder(fragment.requireContext()).apply {
                             data(item.thumbnail)
@@ -77,33 +79,35 @@ class ClipsAdapter(
                             target(thumbnail)
                         }.build()
                     )
-                    if (item.uploadDate != null) {
-                        val text = item.uploadDate.let { TwitchApiHelper.formatTimeString(context, it) }
+                    if (item.createdAt != null) {
+                        val text = Instant.parseOrNull(item.createdAt)?.toEpochMilliseconds()?.takeIf { ms -> ms > 0 }?.let {
+                            TwitchApiHelper.formatDate(context, it)
+                        }
                         if (text != null) {
-                            date.visible()
+                            date.visibility = View.VISIBLE
                             date.text = text
                         } else {
-                            date.gone()
+                            date.visibility = View.GONE
                         }
                     } else {
-                        date.gone()
+                        date.visibility = View.GONE
                     }
                     if (item.viewCount != null) {
-                        views.visible()
+                        views.visibility = View.VISIBLE
                         val count = item.viewCount
                         views.text = context.resources.getQuantityString(
                             R.plurals.views,
                             count,
-                            TwitchApiHelper.formatCount(count, context.prefs().getBoolean(C.UI_TRUNCATEVIEWCOUNT, true))
+                            TwitchApiHelper.formatCount(count, context.prefs().getBoolean(C.UI_TRUNCATE_VIEW_COUNT, true))
                         )
                     } else {
-                        views.gone()
+                        views.visibility = View.GONE
                     }
-                    if (item.duration != null) {
-                        duration.visible()
-                        duration.text = DateUtils.formatElapsedTime(item.duration.toLong())
+                    if (item.durationSeconds != null) {
+                        duration.visibility = View.VISIBLE
+                        duration.text = DateUtils.formatElapsedTime(item.durationSeconds.toLong())
                     } else {
-                        duration.gone()
+                        duration.visibility = View.GONE
                     }
                     if (showChannel) {
                         val channelListener: (View) -> Unit = {
@@ -112,16 +116,16 @@ class ClipsAdapter(
                                     channelId = item.channelId,
                                     channelLogin = item.channelLogin,
                                     channelName = item.channelName,
-                                    channelLogo = item.channelLogo,
+                                    channelImage = item.channelImage,
                                 )
                             )
                         }
-                        if (item.channelLogo != null) {
-                            userImage.visible()
+                        if (item.channelImage != null) {
+                            userImage.visibility = View.VISIBLE
                             fragment.requireContext().imageLoader.enqueue(
                                 ImageRequest.Builder(fragment.requireContext()).apply {
-                                    data(item.channelLogo)
-                                    if (context.prefs().getBoolean(C.UI_ROUNDUSERIMAGE, true)) {
+                                    data(item.channelImage)
+                                    if (context.prefs().getBoolean(C.UI_ROUND_USER_IMAGE, true)) {
                                         transformations(CircleCropTransformation())
                                     }
                                     crossfade(true)
@@ -130,10 +134,10 @@ class ClipsAdapter(
                             )
                             userImage.setOnClickListener(channelListener)
                         } else {
-                            userImage.gone()
+                            userImage.visibility = View.GONE
                         }
                         if (item.channelName != null) {
-                            username.visible()
+                            username.visibility = View.VISIBLE
                             username.text = if (item.channelLogin != null && !item.channelLogin.equals(item.channelName, true)) {
                                 when (context.prefs().getString(C.UI_NAME_DISPLAY, "0")) {
                                     "0" -> "${item.channelName}(${item.channelLogin})"
@@ -145,22 +149,22 @@ class ClipsAdapter(
                             }
                             username.setOnClickListener(channelListener)
                         } else {
-                            username.gone()
+                            username.visibility = View.GONE
                         }
                     } else {
-                        userImage.gone()
-                        username.gone()
+                        userImage.visibility = View.GONE
+                        username.visibility = View.GONE
                     }
-                    if (item.title != null && item.title != "") {
-                        title.visible()
+                    if (!item.title.isNullOrBlank()) {
+                        title.visibility = View.VISIBLE
                         title.text = item.title.trim()
                     } else {
-                        title.gone()
+                        title.visibility = View.GONE
                     }
                     if (showGame && item.gameName != null) {
                         val gameListener: (View) -> Unit = {
                             fragment.findNavController().navigate(
-                                if (context.prefs().getBoolean(C.UI_GAMEPAGER, true)) {
+                                if (context.prefs().getBoolean(C.UI_GAME_PAGER, true)) {
                                     GamePagerFragmentDirections.actionGlobalGamePagerFragment(
                                         gameId = item.gameId,
                                         gameSlug = item.gameSlug,
@@ -175,11 +179,11 @@ class ClipsAdapter(
                                 }
                             )
                         }
-                        gameName.visible()
+                        gameName.visibility = View.VISIBLE
                         gameName.text = item.gameName
                         gameName.setOnClickListener(gameListener)
                     } else {
-                        gameName.gone()
+                        gameName.visibility = View.GONE
                     }
                     options.setOnClickListener { it ->
                         PopupMenu(context, it).apply {

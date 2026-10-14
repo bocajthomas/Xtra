@@ -40,30 +40,27 @@ import com.github.andreyasadchy.xtra.ui.login.LoginActivity
 import com.github.andreyasadchy.xtra.ui.main.MainActivity
 import com.github.andreyasadchy.xtra.ui.search.SearchPagerFragmentDirections
 import com.github.andreyasadchy.xtra.ui.settings.SettingsActivity
+import com.github.andreyasadchy.xtra.ui.team.TeamViewModel.Companion.TeamViewModelFactory
 import com.github.andreyasadchy.xtra.ui.top.TopStreamsFragmentDirections
 import com.github.andreyasadchy.xtra.util.C
+import com.github.andreyasadchy.xtra.util.HeadingFixPlugin
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
 import com.github.andreyasadchy.xtra.util.getAlertDialogBuilder
-import com.github.andreyasadchy.xtra.util.gone
-import com.github.andreyasadchy.xtra.util.isInLandscapeOrientation
 import com.github.andreyasadchy.xtra.util.prefs
 import com.github.andreyasadchy.xtra.util.tokenPrefs
-import com.github.andreyasadchy.xtra.util.visible
 import com.google.android.material.color.MaterialColors
-import dagger.hilt.android.AndroidEntryPoint
 import io.noties.markwon.Markwon
 import io.noties.markwon.SoftBreakAddsNewLinePlugin
 import io.noties.markwon.linkify.LinkifyPlugin
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
-@AndroidEntryPoint
-class TeamFragment : PagedListFragment(), Scrollable, IntegrityDialog.CallbackListener {
+class TeamFragment : PagedListFragment(), Scrollable, IntegrityDialog.Listener {
 
     private var _binding: FragmentTeamBinding? = null
     private val binding get() = _binding!!
     private val args: TeamFragmentArgs by navArgs()
-    private val viewModel: TeamViewModel by viewModels()
+    private val viewModel: TeamViewModel by viewModels { TeamViewModelFactory }
     private lateinit var pagingAdapter: PagingDataAdapter<Stream, out RecyclerView.ViewHolder>
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -79,7 +76,7 @@ class TeamFragment : PagedListFragment(), Scrollable, IntegrityDialog.CallbackLi
         super.onViewCreated(view, savedInstanceState)
         with(binding) {
             val activity = requireActivity() as MainActivity
-            if (activity.isInLandscapeOrientation) {
+            if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
                 appBar.setExpanded(false, false)
             }
             val isLoggedIn = !TwitchApiHelper.getGQLHeaders(requireContext(), true)[C.HEADER_TOKEN].isNullOrBlank() ||
@@ -112,7 +109,7 @@ class TeamFragment : PagedListFragment(), Scrollable, IntegrityDialog.CallbackLi
                         true
                     }
                     R.id.share -> {
-                        requireContext().startActivity(Intent.createChooser(Intent().apply {
+                        startActivity(Intent.createChooser(Intent().apply {
                             action = Intent.ACTION_SEND
                             putExtra(Intent.EXTRA_TEXT, "https://twitch.tv/team/${args.teamName}")
                             args.teamName?.let {
@@ -150,12 +147,19 @@ class TeamFragment : PagedListFragment(), Scrollable, IntegrityDialog.CallbackLi
             )
         }
         setAdapter(binding.recyclerViewLayout.recyclerView, pagingAdapter)
+        viewLifecycleOwner.lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.integrity.collect {
+                    (requireActivity() as? MainActivity)?.getNewIntegrityToken(it, childFragmentManager)
+                }
+            }
+        }
     }
 
     override fun initialize() {
         viewModel.loadTeamInfo(
             teamName = args.teamName,
-            networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+            networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
             gqlHeaders = TwitchApiHelper.getGQLHeaders(requireContext()),
             enableIntegrity = requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
         )
@@ -176,10 +180,10 @@ class TeamFragment : PagedListFragment(), Scrollable, IntegrityDialog.CallbackLi
             }
         }
         initializeAdapter(binding.recyclerViewLayout, pagingAdapter)
-        if (requireContext().prefs().getBoolean(C.UI_SCROLLTOP, true)) {
+        if (requireContext().prefs().getBoolean(C.UI_SCROLL_TOP, true)) {
             binding.recyclerViewLayout.scrollTop.setOnClickListener {
                 scrollToTop()
-                it.gone()
+                it.visibility = View.GONE
             }
         }
     }
@@ -187,33 +191,33 @@ class TeamFragment : PagedListFragment(), Scrollable, IntegrityDialog.CallbackLi
     private fun updateTeamLayout(team: Team) {
         with(binding) {
             if (!team.displayName.isNullOrBlank()) {
-                teamName.visible()
+                teamName.visibility = View.VISIBLE
                 teamName.text = team.displayName
                 if (team.bannerUrl != null) {
                     teamName.setTextColor(Color.LTGRAY)
                     teamName.setShadowLayer(4f, 0f, 0f, Color.BLACK)
                 }
             } else {
-                teamName.gone()
+                teamName.visibility = View.GONE
             }
             if (team.memberCount != null) {
-                teamMembers.visible()
+                teamMembers.visibility = View.VISIBLE
                 val count = team.memberCount
-                teamMembers.text = requireContext().resources.getQuantityString(
+                teamMembers.text = resources.getQuantityString(
                     R.plurals.members,
                     count,
-                    TwitchApiHelper.formatCount(count, requireContext().prefs().getBoolean(C.UI_TRUNCATEVIEWCOUNT, true))
+                    TwitchApiHelper.formatCount(count, requireContext().prefs().getBoolean(C.UI_TRUNCATE_VIEW_COUNT, true))
                 )
                 if (team.bannerUrl != null) {
                     teamMembers.setTextColor(Color.LTGRAY)
                     teamMembers.setShadowLayer(4f, 0f, 0f, Color.BLACK)
                 }
             } else {
-                teamMembers.gone()
+                teamMembers.visibility = View.GONE
             }
             if (!team.ownerName.isNullOrBlank() || !team.ownerLogin.isNullOrBlank()) {
-                teamOwner.visible()
-                teamOwner.text = requireContext().getString(
+                teamOwner.visibility = View.VISIBLE
+                teamOwner.text = getString(
                     R.string.owner,
                     if (team.ownerLogin != null && !team.ownerLogin.equals(team.ownerName, true)) {
                         when (requireContext().prefs().getString(C.UI_NAME_DISPLAY, "0")) {
@@ -230,14 +234,14 @@ class TeamFragment : PagedListFragment(), Scrollable, IntegrityDialog.CallbackLi
                     teamOwner.setShadowLayer(4f, 0f, 0f, Color.BLACK)
                 }
             } else {
-                teamOwner.gone()
+                teamOwner.visibility = View.GONE
             }
             if (team.logoUrl != null) {
-                logoImage.visible()
+                logoImage.visibility = View.VISIBLE
                 requireContext().imageLoader.enqueue(
                     ImageRequest.Builder(requireContext()).apply {
                         data(team.logoUrl)
-                        if (requireContext().prefs().getBoolean(C.UI_ROUNDUSERIMAGE, true)) {
+                        if (requireContext().prefs().getBoolean(C.UI_ROUND_USER_IMAGE, true)) {
                             transformations(CircleCropTransformation())
                         }
                         crossfade(true)
@@ -245,10 +249,10 @@ class TeamFragment : PagedListFragment(), Scrollable, IntegrityDialog.CallbackLi
                     }.build()
                 )
             } else {
-                logoImage.gone()
+                logoImage.visibility = View.GONE
             }
             if (team.bannerUrl != null) {
-                bannerImage.visible()
+                bannerImage.visibility = View.VISIBLE
                 requireContext().imageLoader.enqueue(
                     ImageRequest.Builder(requireContext()).apply {
                         data(team.bannerUrl)
@@ -257,13 +261,14 @@ class TeamFragment : PagedListFragment(), Scrollable, IntegrityDialog.CallbackLi
                     }.build()
                 )
             } else {
-                bannerImage.gone()
+                bannerImage.visibility = View.GONE
             }
             if (!team.description.isNullOrBlank()) {
-                teamDescription.visible()
+                teamDescription.visibility = View.VISIBLE
                 val markwon = Markwon.builder(requireContext())
                     .usePlugin(SoftBreakAddsNewLinePlugin.create())
                     .usePlugin(LinkifyPlugin.create())
+                    .usePlugin(HeadingFixPlugin())
                     .build()
                 markwon.setMarkdown(teamDescription, team.description)
                 teamDescription.setOnClickListener {
@@ -274,7 +279,7 @@ class TeamFragment : PagedListFragment(), Scrollable, IntegrityDialog.CallbackLi
                     }
                 }
             } else {
-                teamDescription.gone()
+                teamDescription.visibility = View.GONE
             }
         }
     }
@@ -289,26 +294,24 @@ class TeamFragment : PagedListFragment(), Scrollable, IntegrityDialog.CallbackLi
     override fun onNetworkRestored() {
         viewModel.loadTeamInfo(
             teamName = args.teamName,
-            networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+            networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
             gqlHeaders = TwitchApiHelper.getGQLHeaders(requireContext()),
             enableIntegrity = requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
         )
         pagingAdapter.retry()
     }
 
-    override fun onIntegrityDialogCallback(callback: String?) {
-        if (callback == "refresh") {
-            viewLifecycleOwner.lifecycleScope.launch {
-                repeatOnLifecycle(Lifecycle.State.STARTED) {
-                    viewModel.loadTeamInfo(
-                        teamName = args.teamName,
-                        networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
-                        gqlHeaders = TwitchApiHelper.getGQLHeaders(requireContext()),
-                        enableIntegrity = requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
-                    )
-                }
+    override fun onIntegrityTokenLoaded(callback: String?) {
+        when (callback) {
+            "refresh" -> {
+                viewModel.loadTeamInfo(
+                    teamName = args.teamName,
+                    networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                    gqlHeaders = TwitchApiHelper.getGQLHeaders(requireContext()),
+                    enableIntegrity = requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
+                )
+                pagingAdapter.refresh()
             }
-            pagingAdapter.refresh()
         }
     }
 

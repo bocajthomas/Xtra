@@ -21,17 +21,19 @@ import com.github.andreyasadchy.xtra.R
 import com.github.andreyasadchy.xtra.databinding.FragmentVideosListItemBinding
 import com.github.andreyasadchy.xtra.model.VideoPosition
 import com.github.andreyasadchy.xtra.model.ui.Bookmark
+import com.github.andreyasadchy.xtra.model.ui.BookmarkIgnoredUser
 import com.github.andreyasadchy.xtra.model.ui.Video
-import com.github.andreyasadchy.xtra.model.ui.VodBookmarkIgnoredUser
 import com.github.andreyasadchy.xtra.ui.channel.ChannelPagerFragmentDirections
 import com.github.andreyasadchy.xtra.ui.game.GameMediaFragmentDirections
 import com.github.andreyasadchy.xtra.ui.game.GamePagerFragmentDirections
 import com.github.andreyasadchy.xtra.ui.main.MainActivity
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
-import com.github.andreyasadchy.xtra.util.gone
+import com.github.andreyasadchy.xtra.util.TwitchApiHelper.getDurationFromSeconds
 import com.github.andreyasadchy.xtra.util.prefs
-import com.github.andreyasadchy.xtra.util.visible
+import kotlin.time.Clock
+import kotlin.time.Duration.Companion.days
+import kotlin.time.Instant
 
 class BookmarksAdapter(
     private val fragment: Fragment,
@@ -45,7 +47,8 @@ class BookmarksAdapter(
             oldItem.id == newItem.id
 
         override fun areContentsTheSame(oldItem: Bookmark, newItem: Bookmark): Boolean =
-            oldItem.title == newItem.title &&
+            oldItem.thumbnail == newItem.thumbnail &&
+                    oldItem.title == newItem.title &&
                     oldItem.duration == newItem.duration
     }) {
 
@@ -67,9 +70,9 @@ class BookmarksAdapter(
         }
     }
 
-    private var ignored: List<VodBookmarkIgnoredUser>? = null
+    private var ignored: List<BookmarkIgnoredUser>? = null
 
-    fun setIgnoredUsers(list: List<VodBookmarkIgnoredUser>) {
+    fun setIgnoredUsers(list: List<BookmarkIgnoredUser>) {
         this.ignored = list
         if (itemCount != 0) {
             notifyDataSetChanged()
@@ -90,14 +93,14 @@ class BookmarksAdapter(
                                 channelId = item.userId,
                                 channelLogin = item.userLogin,
                                 channelName = item.userName,
-                                channelLogo = item.userLogo,
+                                channelImage = item.userLogo,
                                 updateLocal = true
                             )
                         )
                     }
                     val gameListener: (View) -> Unit = {
                         fragment.findNavController().navigate(
-                            if (context.prefs().getBoolean(C.UI_GAMEPAGER, true)) {
+                            if (context.prefs().getBoolean(C.UI_GAME_PAGER, true)) {
                                 GamePagerFragmentDirections.actionGlobalGamePagerFragment(
                                     gameId = item.gameId,
                                     gameSlug = item.gameSlug,
@@ -112,10 +115,9 @@ class BookmarksAdapter(
                             }
                         )
                     }
-                    val getDuration = item.duration?.let { TwitchApiHelper.getDuration(it) }
+                    val durationSeconds = item.duration?.let { duration -> duration.toIntOrNull() ?: TwitchApiHelper.getDuration(duration) }
                     val position = item.videoId?.toLongOrNull()?.let { id -> positions?.find { it.id == id }?.position }
                     val ignore = ignored?.find { it.userId == item.userId } != null
-                    val userType = item.userType ?: item.userBroadcasterType
                     root.setOnClickListener {
                         (fragment.activity as MainActivity).startVideo(
                             Video(
@@ -123,20 +125,25 @@ class BookmarksAdapter(
                                 channelId = item.userId,
                                 channelLogin = item.userLogin,
                                 channelName = item.userName,
-                                profileImageUrl = item.userLogo,
+                                channelImageURL = item.userLogo,
                                 gameId = item.gameId,
                                 gameSlug = item.gameSlug,
                                 gameName = item.gameName,
                                 title = item.title,
-                                uploadDate = item.createdAt,
-                                thumbnailUrl = item.thumbnail,
+                                thumbnailURL = item.thumbnail,
+                                createdAt = item.createdAt,
+                                durationSeconds = durationSeconds,
                                 type = item.type,
-                                duration = item.duration,
                                 animatedPreviewURL = item.animatedPreviewURL,
-                            ), position
+                            ),
+                            position,
+                            false
                         )
                     }
-                    root.setOnLongClickListener { deleteVideo(item); true }
+                    root.setOnLongClickListener {
+                        deleteVideo(item)
+                        true
+                    }
                     fragment.requireContext().imageLoader.enqueue(
                         ImageRequest.Builder(fragment.requireContext()).apply {
                             data(item.thumbnail)
@@ -146,57 +153,71 @@ class BookmarksAdapter(
                         }.build()
                     )
                     if (item.createdAt != null) {
-                        val text = TwitchApiHelper.formatTimeString(context, item.createdAt)
+                        val text = item.createdAt?.let { createdAt ->
+                            Instant.parseOrNull(createdAt)?.toEpochMilliseconds()?.takeIf { ms -> ms > 0 }?.let {
+                                TwitchApiHelper.formatDate(context, it)
+                            }
+                        }
                         if (text != null) {
-                            date.visible()
+                            date.visibility = View.VISIBLE
                             date.text = text
                         } else {
-                            date.gone()
+                            date.visibility = View.GONE
                         }
                     } else {
-                        date.gone()
+                        date.visibility = View.GONE
                     }
-                    if (item.type?.lowercase() == "archive" && userType != null && item.createdAt != null && context.prefs().getBoolean(C.UI_BOOKMARK_TIME_LEFT, true) && !ignore) {
-                        val time = TwitchApiHelper.getVodTimeLeft(context, item.createdAt,
-                            when (userType.lowercase()) {
-                                "" -> 14
-                                "affiliate" -> 14
-                                else -> 60
+                    if (item.type?.lowercase() == "archive" && item.createdAt != null && context.prefs().getBoolean(C.UI_BOOKMARK_TIME_LEFT, true) && !ignore) {
+                        val text = item.createdAt?.let {
+                            Instant.parseOrNull(it)?.takeIf { time -> time.toEpochMilliseconds() > 0 }?.let { createdAt ->
+                                val userType = item.userType ?: item.userBroadcasterType
+                                val days = if (userType.isNullOrBlank()) {
+                                    7
+                                } else {
+                                    when (userType.lowercase()) {
+                                        "affiliate" -> 14
+                                        else -> 60 // Partners, Prime, Turbo
+                                    }
+                                }
+                                val timeLeft = (createdAt + days.days) - Clock.System.now()
+                                if (timeLeft.isPositive()) {
+                                    getDurationFromSeconds(context, timeLeft.inWholeSeconds.toString())
+                                } else null
                             }
-                        )
-                        if (!time.isNullOrBlank()) {
-                            views.visible()
-                            views.text = context.getString(R.string.vod_time_left, time)
+                        }
+                        if (text != null) {
+                            views.visibility = View.VISIBLE
+                            views.text = context.getString(R.string.vod_time_left, text)
                         } else {
-                            views.gone()
+                            views.visibility = View.GONE
                         }
                     } else {
-                        views.gone()
+                        views.visibility = View.GONE
                     }
-                    if (getDuration != null) {
-                        duration.visible()
-                        duration.text = DateUtils.formatElapsedTime(getDuration)
+                    if (durationSeconds != null) {
+                        duration.visibility = View.VISIBLE
+                        duration.text = DateUtils.formatElapsedTime(durationSeconds.toLong())
                     } else {
-                        duration.gone()
+                        duration.visibility = View.GONE
                     }
                     if (item.type != null) {
                         val text = TwitchApiHelper.getType(context, item.type)
                         if (text != null) {
-                            type.visible()
+                            type.visibility = View.VISIBLE
                             type.text = text
                         } else {
-                            type.gone()
+                            type.visibility = View.GONE
                         }
                     } else {
-                        type.gone()
+                        type.visibility = View.GONE
                     }
                     if (item.userLogo != null) {
-                        userImage.visible()
+                        userImage.visibility = View.VISIBLE
                         fragment.requireContext().imageLoader.enqueue(
                             ImageRequest.Builder(fragment.requireContext()).apply {
                                 data(item.userLogo)
                                 diskCachePolicy(CachePolicy.DISABLED)
-                                if (context.prefs().getBoolean(C.UI_ROUNDUSERIMAGE, true)) {
+                                if (context.prefs().getBoolean(C.UI_ROUND_USER_IMAGE, true)) {
                                     transformations(CircleCropTransformation())
                                 }
                                 crossfade(true)
@@ -205,10 +226,10 @@ class BookmarksAdapter(
                         )
                         userImage.setOnClickListener(channelListener)
                     } else {
-                        userImage.gone()
+                        userImage.visibility = View.GONE
                     }
                     if (item.userName != null) {
-                        username.visible()
+                        username.visibility = View.VISIBLE
                         username.text = if (item.userLogin != null && !item.userLogin.equals(item.userName, true)) {
                             when (context.prefs().getString(C.UI_NAME_DISPLAY, "0")) {
                                 "0" -> "${item.userName}(${item.userLogin})"
@@ -220,26 +241,27 @@ class BookmarksAdapter(
                         }
                         username.setOnClickListener(channelListener)
                     } else {
-                        username.gone()
+                        username.visibility = View.GONE
                     }
-                    if (position != null && getDuration != null && getDuration > 0L) {
-                        progressBar.progress = (position / (getDuration * 10)).toInt()
-                        progressBar.visible()
+                    if (position != null && durationSeconds != null && durationSeconds > 0L) {
+                        progressBar.progress = (position / (durationSeconds * 10)).toInt()
+                        progressBar.visibility = View.VISIBLE
                     } else {
-                        progressBar.gone()
+                        progressBar.visibility = View.GONE
                     }
-                    if (item.title != null) {
-                        title.visible()
-                        title.text = item.title.trim()
+                    val videoTitle = item.title
+                    if (!videoTitle.isNullOrBlank()) {
+                        title.visibility = View.VISIBLE
+                        title.text = videoTitle.trim()
                     } else {
-                        title.gone()
+                        title.visibility = View.GONE
                     }
                     if (item.gameName != null) {
-                        gameName.visible()
+                        gameName.visibility = View.VISIBLE
                         gameName.text = item.gameName
                         gameName.setOnClickListener(gameListener)
                     } else {
-                        gameName.gone()
+                        gameName.visibility = View.GONE
                     }
                     options.setOnClickListener { it ->
                         PopupMenu(context, it).apply {
@@ -265,14 +287,14 @@ class BookmarksAdapter(
                                             channelId = item.userId,
                                             channelLogin = item.userLogin,
                                             channelName = item.userName,
-                                            profileImageUrl = item.userLogo,
+                                            channelImageURL = item.userLogo,
                                             gameId = item.gameId,
                                             gameName = item.gameName,
                                             title = item.title,
-                                            uploadDate = item.createdAt,
-                                            thumbnailUrl = item.thumbnail,
+                                            thumbnailURL = item.thumbnail,
+                                            createdAt = item.createdAt,
+                                            durationSeconds = durationSeconds,
                                             type = item.type,
-                                            duration = item.duration,
                                             animatedPreviewURL = item.animatedPreviewURL,
                                         )
                                     )

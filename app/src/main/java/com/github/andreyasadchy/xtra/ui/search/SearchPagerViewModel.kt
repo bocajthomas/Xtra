@@ -1,19 +1,22 @@
 package com.github.andreyasadchy.xtra.ui.search
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
+import com.github.andreyasadchy.xtra.XtraApp
 import com.github.andreyasadchy.xtra.repository.GraphQLRepository
-import dagger.hilt.android.lifecycle.HiltViewModel
+import com.github.andreyasadchy.xtra.util.C
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
-import javax.inject.Inject
 
-@HiltViewModel
-class SearchPagerViewModel @Inject constructor(
+class SearchPagerViewModel(
     private val graphQLRepository: GraphQLRepository,
 ) : ViewModel() {
 
-    val integrity = MutableStateFlow<String?>(null)
+    val integrity = MutableSharedFlow<String?>()
 
     val userResult = MutableStateFlow<Pair<String?, String?>?>(null)
     private var isLoading = false
@@ -25,9 +28,9 @@ class SearchPagerViewModel @Inject constructor(
                 try {
                     userResult.value = if (checkedId == 0) {
                         val response = graphQLRepository.loadQueryUserResultID(networkLibrary, gqlHeaders, result)
-                        if (enableIntegrity && integrity.value == null) {
-                            response.errors?.find { it.message == "failed integrity check" }?.let {
-                                integrity.value = "refresh"
+                        if (enableIntegrity) {
+                            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                integrity.emit("refresh")
                                 isLoading = false
                                 return@launch
                             }
@@ -42,9 +45,9 @@ class SearchPagerViewModel @Inject constructor(
                         }
                     } else {
                         val response = graphQLRepository.loadQueryUserResultLogin(networkLibrary, gqlHeaders, result)
-                        if (enableIntegrity && integrity.value == null) {
-                            response.errors?.find { it.message == "failed integrity check" }?.let {
-                                integrity.value = "refresh"
+                        if (enableIntegrity) {
+                            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                integrity.emit("refresh")
                                 isLoading = false
                                 return@launch
                             }
@@ -63,6 +66,16 @@ class SearchPagerViewModel @Inject constructor(
                 } finally {
                     isLoading = false
                 }
+            }
+        }
+    }
+
+    companion object {
+        val SearchPagerViewModelFactory = viewModelFactory {
+            initializer {
+                val application = (this[APPLICATION_KEY] as XtraApp)
+                val xtraModule = application.xtraModule
+                SearchPagerViewModel(xtraModule.graphQLRepository)
             }
         }
     }

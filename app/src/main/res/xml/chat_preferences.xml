@@ -100,6 +100,21 @@
         app:singleLineTitle="false"
         app:useSimpleSummaryProvider="true" />
 
+    <SwitchPreferenceCompat
+        android:defaultValue="true"
+        android:key="chat_show_gif_messages"
+        android:title="@string/show_gif_messages"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <EditTextPreference
+        android:defaultValue="79.5"
+        android:key="chat_gif_size"
+        android:title="@string/chat_gif_size"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false"
+        app:useSimpleSummaryProvider="true" />
+
     <SeekBarPreference
         android:defaultValue="30"
         android:key="chatWidth"
@@ -123,6 +138,14 @@
         android:defaultValue="true"
         android:key="chat_recent"
         android:title="@string/recentMsg_enable"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <EditTextPreference
+        android:defaultValue="https://recent-messages.robotty.de/api/v2/recent-messages/$channel"
+        android:key="chat_recent_messages_url"
+        android:summary="@string/stream_proxy_url_desc"
+        android:title="@string/recent_messages_api_url"
         app:iconSpaceReserved="false"
         app:singleLineTitle="false" />
 
@@ -165,7 +188,7 @@
         app:singleLineTitle="false" />
 
     <SwitchPreferenceCompat
-        android:defaultValue="false"
+        android:defaultValue="true"
         android:key="chat_use_websocket"
         android:title="@string/use_websocket"
         app:iconSpaceReserved="false"

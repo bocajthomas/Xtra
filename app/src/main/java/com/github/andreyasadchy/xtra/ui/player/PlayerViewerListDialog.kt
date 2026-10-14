@@ -6,7 +6,6 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
-import androidx.core.os.bundleOf
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -16,20 +15,17 @@ import com.github.andreyasadchy.xtra.R
 import com.github.andreyasadchy.xtra.databinding.FragmentViewerListBinding
 import com.github.andreyasadchy.xtra.model.ui.ChannelViewerList
 import com.github.andreyasadchy.xtra.ui.common.IntegrityDialog
+import com.github.andreyasadchy.xtra.ui.main.MainActivity
+import com.github.andreyasadchy.xtra.ui.player.PlayerViewerListViewModel.Companion.PlayerViewerListViewModelFactory
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
-import com.github.andreyasadchy.xtra.util.gone
 import com.github.andreyasadchy.xtra.util.prefs
-import com.github.andreyasadchy.xtra.util.visible
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
-import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
-
-@AndroidEntryPoint
-class PlayerViewerListDialog : BottomSheetDialogFragment(), IntegrityDialog.CallbackListener {
+class PlayerViewerListDialog : BottomSheetDialogFragment(), IntegrityDialog.Listener {
 
     companion object {
 
@@ -37,14 +33,16 @@ class PlayerViewerListDialog : BottomSheetDialogFragment(), IntegrityDialog.Call
 
         fun newInstance(login: String): PlayerViewerListDialog {
             return PlayerViewerListDialog().apply {
-                arguments = bundleOf(LOGIN to login)
+                arguments = Bundle().apply {
+                    putString(LOGIN, login)
+                }
             }
         }
     }
 
     private var _binding: FragmentViewerListBinding? = null
     private val binding get() = _binding!!
-    private val viewModel: PlayerViewerListViewModel by viewModels()
+    private val viewModel: PlayerViewerListViewModel by viewModels { PlayerViewerListViewModelFactory }
 
     private val moderatorsListItems = mutableListOf<String>()
     private var moderatorsListOffset = 0
@@ -66,21 +64,14 @@ class PlayerViewerListDialog : BottomSheetDialogFragment(), IntegrityDialog.Call
         with(binding) {
             viewLifecycleOwner.lifecycleScope.launch {
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
-                    viewModel.integrity.collectLatest {
-                        if (it != null &&
-                            it != "done" &&
-                            requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false) &&
-                            requireContext().prefs().getBoolean(C.USE_WEBVIEW_INTEGRITY, true)
-                        ) {
-                            IntegrityDialog.show(childFragmentManager, it)
-                            viewModel.integrity.value = "done"
-                        }
+                    viewModel.integrity.collect {
+                        (requireActivity() as? MainActivity)?.getNewIntegrityToken(it, childFragmentManager)
                     }
                 }
             }
             viewModel.loadViewerList(
                 requireArguments().getString(LOGIN),
-                requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+                requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
                 TwitchApiHelper.getGQLHeaders(requireContext()),
                 requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
             )
@@ -89,55 +80,55 @@ class PlayerViewerListDialog : BottomSheetDialogFragment(), IntegrityDialog.Call
                     viewModel.viewerList.collectLatest { fullList ->
                         if (fullList != null) {
                             if (fullList.broadcasters.isNotEmpty()) {
-                                broadcasterText.visible()
-                                broadcasterList.visible()
+                                broadcasterText.visibility = View.VISIBLE
+                                broadcasterList.visibility = View.VISIBLE
                                 broadcasterList.adapter = Adapter(context, fullList.broadcasters)
                             } else {
-                                broadcasterText.gone()
-                                broadcasterList.gone()
+                                broadcasterText.visibility = View.GONE
+                                broadcasterList.visibility = View.GONE
                             }
                             if (fullList.moderators.isNotEmpty()) {
-                                moderatorsText.visible()
+                                moderatorsText.visibility = View.VISIBLE
                                 moderatorsList.apply {
-                                    visible()
+                                    visibility = View.VISIBLE
                                     adapter = Adapter(context, moderatorsListItems)
                                 }
                                 loadItems(fullList, moderatorsList)
                             } else {
-                                moderatorsText.gone()
-                                moderatorsList.gone()
+                                moderatorsText.visibility = View.GONE
+                                moderatorsList.visibility = View.GONE
                             }
                             if (fullList.vips.isNotEmpty()) {
-                                vipsText.visible()
+                                vipsText.visibility = View.VISIBLE
                                 vipsList.apply {
-                                    visible()
+                                    visibility = View.VISIBLE
                                     adapter = Adapter(context, vipsListItems)
                                 }
                                 if (fullList.moderators.size <= 100) {
                                     loadItems(fullList, vipsList)
                                 }
                             } else {
-                                vipsText.gone()
-                                vipsList.gone()
+                                vipsText.visibility = View.GONE
+                                vipsList.visibility = View.GONE
                             }
                             if (fullList.viewers.isNotEmpty()) {
-                                viewersText.visible()
+                                viewersText.visibility = View.VISIBLE
                                 viewersList.apply {
-                                    visible()
+                                    visibility = View.VISIBLE
                                     adapter = Adapter(context, viewerListItems)
                                 }
                                 if ((fullList.moderators.size + fullList.vips.size) <= 100) {
                                     loadItems(fullList, viewersList)
                                 }
                             } else {
-                                viewersText.gone()
-                                viewersList.gone()
+                                viewersText.visibility = View.GONE
+                                viewersList.visibility = View.GONE
                             }
                             if (fullList.count != null) {
-                                userCount.visible()
-                                userCount.text = requireContext().getString(R.string.user_count, TwitchApiHelper.formatCount(fullList.count, requireContext().prefs().getBoolean(C.UI_TRUNCATEVIEWCOUNT, true)))
+                                userCount.visibility = View.VISIBLE
+                                userCount.text = getString(R.string.user_count, TwitchApiHelper.formatCount(fullList.count, requireContext().prefs().getBoolean(C.UI_TRUNCATE_VIEW_COUNT, true)))
                             } else {
-                                userCount.gone()
+                                userCount.visibility = View.GONE
                             }
                             scrollView.viewTreeObserver.addOnScrollChangedListener {
                                 if (!scrollView.canScrollVertically(1)) {
@@ -184,17 +175,15 @@ class PlayerViewerListDialog : BottomSheetDialogFragment(), IntegrityDialog.Call
         }
     }
 
-    override fun onIntegrityDialogCallback(callback: String?) {
-        if (callback == "refresh") {
-            viewLifecycleOwner.lifecycleScope.launch {
-                repeatOnLifecycle(Lifecycle.State.STARTED) {
-                    viewModel.loadViewerList(
-                        requireArguments().getString(LOGIN),
-                        requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
-                        TwitchApiHelper.getGQLHeaders(requireContext()),
-                        requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
-                    )
-                }
+    override fun onIntegrityTokenLoaded(callback: String?) {
+        when (callback) {
+            "refresh" -> {
+                viewModel.loadViewerList(
+                    requireArguments().getString(LOGIN),
+                    requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                    TwitchApiHelper.getGQLHeaders(requireContext()),
+                    requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
+                )
             }
         }
     }

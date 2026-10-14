@@ -1,68 +1,133 @@
 package com.github.andreyasadchy.xtra.ui.game
 
+import android.annotation.SuppressLint
 import android.net.http.HttpEngine
-import android.net.http.UrlResponseInfo
-import android.os.Build
-import android.os.ext.SdkExtensions
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
+import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewModelScope
-import com.github.andreyasadchy.xtra.model.ui.LocalFollowGame
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
+import com.github.andreyasadchy.xtra.XtraApp
+import com.github.andreyasadchy.xtra.model.ui.Game
+import com.github.andreyasadchy.xtra.model.ui.LocalGameFollow
+import com.github.andreyasadchy.xtra.model.ui.Tag
 import com.github.andreyasadchy.xtra.repository.GraphQLRepository
 import com.github.andreyasadchy.xtra.repository.HelixRepository
-import com.github.andreyasadchy.xtra.repository.LocalFollowGameRepository
+import com.github.andreyasadchy.xtra.repository.LocalGameFollowsRepository
 import com.github.andreyasadchy.xtra.util.C
-import com.github.andreyasadchy.xtra.util.HttpEngineUtils
+import com.github.andreyasadchy.xtra.util.NetworkUtils
+import com.github.andreyasadchy.xtra.util.NetworkUtils.executeAsync
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
-import com.github.andreyasadchy.xtra.util.getByteArrayCronetCallback
-import dagger.Lazy
-import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.chromium.net.CronetEngine
-import org.chromium.net.apihelpers.RedirectHandlers
-import org.chromium.net.apihelpers.UrlRequestCallbacks
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.ExecutorService
-import javax.inject.Inject
-import kotlin.coroutines.suspendCoroutine
 
-@HiltViewModel
-class GamePagerViewModel @Inject constructor(
+class GamePagerViewModel(
     private val graphQLRepository: GraphQLRepository,
     private val helixRepository: HelixRepository,
-    private val localFollowsGame: LocalFollowGameRepository,
-    private val httpEngine: Lazy<HttpEngine>?,
-    private val cronetEngine: Lazy<CronetEngine>?,
-    private val cronetExecutor: ExecutorService,
-    private val okHttpClient: OkHttpClient,
+    private val localGameFollowsRepository: LocalGameFollowsRepository,
+    private val httpEngine: Lazy<HttpEngine?>,
+    private val cronetEngine: Lazy<CronetEngine?>,
+    private val cronetExecutor: Lazy<ExecutorService>,
+    private val okHttpClient: Lazy<OkHttpClient>,
+    savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
 
-    val integrity = MutableStateFlow<String?>(null)
+    val integrity = MutableSharedFlow<String?>()
 
+    private val args = GamePagerFragmentArgs.fromSavedStateHandle(savedStateHandle)
     private val _isFollowing = MutableStateFlow<Boolean?>(null)
     val isFollowing: StateFlow<Boolean?> = _isFollowing
     val follow = MutableStateFlow<Pair<Boolean, String?>?>(null)
     private var updatedLocalGame = false
 
-    fun isFollowingGame(gameId: String?, gameName: String?, setting: Int, networkLibrary: String?, gqlHeaders: Map<String, String>) {
+    private val _game = MutableStateFlow<Game?>(null)
+    val game: StateFlow<Game?> = _game
+
+    fun loadGame(networkLibrary: String?, gqlHeaders: Map<String, String>, helixHeaders: Map<String, String>, enableIntegrity: Boolean) {
+        if (_game.value == null) {
+            viewModelScope.launch {
+                _game.value = try {
+                    val response = graphQLRepository.loadQueryGame(
+                        networkLibrary = networkLibrary,
+                        headers = gqlHeaders,
+                        id = args.gameId,
+                        slug = args.gameSlug.takeIf { args.gameId.isNullOrBlank() },
+                        name = args.gameName.takeIf { args.gameId.isNullOrBlank() && args.gameSlug.isNullOrBlank() },
+                    )
+                    if (enableIntegrity) {
+                        response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                            integrity.emit("refresh")
+                            return@launch
+                        }
+                    }
+                    response.data!!.game?.let {
+                        Game(
+                            id = it.id,
+                            slug = it.slug,
+                            name = it.displayName,
+                            boxArtURL = it.boxArtURL,
+                            viewerCount = it.viewersCount,
+                            broadcasterCount = it.broadcastersCount,
+                            followerCount = it.followersCount,
+                            tags = it.tags?.map { tag ->
+                                Tag(
+                                    id = tag.id,
+                                    name = tag.localizedName
+                                )
+                            }
+                        )
+                    }
+                } catch (e: Exception) {
+                    if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        try {
+                            helixRepository.getGames(
+                                networkLibrary = networkLibrary,
+                                headers = helixHeaders,
+                                ids = args.gameId?.let { listOf(it) },
+                                names = if (args.gameId.isNullOrBlank()) args.gameName?.let { listOf(it) } else null
+                            ).data.firstOrNull()?.let {
+                                Game(
+                                    id = it.id,
+                                    name = it.name,
+                                    boxArtURL = it.boxArtURL
+                                )
+                            }
+                        } catch (e: Exception) {
+                            null
+                        }
+                    } else null
+                }
+            }
+        }
+    }
+
+    fun isFollowingGame(gameId: String?, setting: Int, networkLibrary: String?, gqlHeaders: Map<String, String>) {
         if (_isFollowing.value == null) {
             viewModelScope.launch {
                 try {
-                    val isFollowing = if (setting == 0 && !gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                        gameName?.let {
-                            graphQLRepository.loadFollowingGame(networkLibrary, gqlHeaders, gameName).data?.game?.self?.follow != null
-                        } == true
-                    } else {
-                        gameId?.let {
-                            localFollowsGame.getFollowByGameId(it)
-                        } != null
+                    if (!gameId.isNullOrBlank()) {
+                        _isFollowing.value = if (setting == 0 && !gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                            graphQLRepository.loadQueryFollowingGame(
+                                networkLibrary = networkLibrary,
+                                headers = gqlHeaders,
+                                id = gameId,
+                            ).data?.game?.self?.follow?.followedAt != null
+                        } else {
+                            localGameFollowsRepository.getById(gameId) != null
+                        }
                     }
-                    _isFollowing.value = isFollowing
                 } catch (e: Exception) {
 
                 }
@@ -73,23 +138,23 @@ class GamePagerViewModel @Inject constructor(
     fun saveFollowGame(gameId: String?, gameSlug: String?, gameName: String?, setting: Int, filesDir: String, networkLibrary: String?, gqlHeaders: Map<String, String>, helixHeaders: Map<String, String>, enableIntegrity: Boolean) {
         viewModelScope.launch {
             try {
-                if (setting == 0 && !gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                    val errorMessage = graphQLRepository.loadFollowGame(networkLibrary, gqlHeaders, gameId).also { response ->
-                        if (enableIntegrity && integrity.value == null) {
-                            response.errors?.find { it.message == "failed integrity check" }?.let {
-                                integrity.value = "follow"
-                                return@launch
+                if (!gameId.isNullOrBlank()) {
+                    if (setting == 0 && !gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        val errorMessage = graphQLRepository.loadFollowGame(networkLibrary, gqlHeaders, gameId).also { response ->
+                            if (enableIntegrity) {
+                                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                    integrity.emit("follow")
+                                    return@launch
+                                }
                             }
+                        }.errors?.firstOrNull()?.message
+                        if (!errorMessage.isNullOrBlank()) {
+                            follow.value = Pair(true, errorMessage)
+                        } else {
+                            _isFollowing.value = true
+                            follow.value = Pair(true, null)
                         }
-                    }.errors?.firstOrNull()?.message
-                    if (!errorMessage.isNullOrBlank()) {
-                        follow.value = Pair(true, errorMessage)
                     } else {
-                        _isFollowing.value = true
-                        follow.value = Pair(true, null)
-                    }
-                } else {
-                    if (!gameId.isNullOrBlank()) {
                         File(filesDir, "box_art").mkdir()
                         val path = filesDir + File.separator + "box_art" + File.separator + gameId
                         viewModelScope.launch(Dispatchers.IO) {
@@ -102,43 +167,54 @@ class GamePagerViewModel @Inject constructor(
                                             networkLibrary = networkLibrary,
                                             headers = helixHeaders,
                                             ids = listOf(gameId)
-                                        ).data.firstOrNull()?.boxArtUrl
+                                        ).data.firstOrNull()?.boxArtURL
                                     } else null
-                                }.takeIf { !it.isNullOrBlank() }?.let { TwitchApiHelper.getTemplateUrl(it, "game") }?.let {
+                                }.takeIf { !it.isNullOrBlank() }?.let { TwitchApiHelper.getGameBoxArt(it) }?.let { url ->
                                     when {
-                                        networkLibrary == "HttpEngine" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S) >= 7 && httpEngine != null -> {
-                                            val response = suspendCoroutine<Pair<UrlResponseInfo, ByteArray>> { continuation ->
-                                                httpEngine.get().newUrlRequestBuilder(it, cronetExecutor, HttpEngineUtils.byteArrayUrlCallback(continuation)).build().start()
+                                        networkLibrary == C.HTTP_ENGINE && httpEngine.value != null -> @SuppressLint("NewApi") {
+                                            val response = suspendCancellableCoroutine { continuation ->
+                                                val timeout = NetworkUtils.HttpEngineTimeout()
+                                                val request = httpEngine.value!!.newUrlRequestBuilder(
+                                                    url,
+                                                    cronetExecutor.value,
+                                                    NetworkUtils.ByteArrayUrlCallback(continuation, timeout)
+                                                ).build()
+                                                timeout.start(request, continuation)
+                                                request.start()
+                                                continuation.invokeOnCancellation {
+                                                    request.cancel()
+                                                    timeout.stop()
+                                                }
                                             }
-                                            if (response.first.httpStatusCode in 200..299) {
+                                            if (response.info.httpStatusCode in 200..299) {
                                                 FileOutputStream(path).use {
-                                                    it.write(response.second)
+                                                    it.write(response.body)
                                                 }
                                             }
                                         }
-                                        networkLibrary == "Cronet" && cronetEngine != null -> {
-                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                                                val request = UrlRequestCallbacks.forByteArrayBody(RedirectHandlers.alwaysFollow())
-                                                cronetEngine.get().newUrlRequestBuilder(it, request.callback, cronetExecutor).build().start()
-                                                val response = request.future.get()
-                                                if (response.urlResponseInfo.httpStatusCode in 200..299) {
-                                                    FileOutputStream(path).use {
-                                                        it.write(response.responseBody as ByteArray)
-                                                    }
+                                        networkLibrary == C.CRONET && cronetEngine.value != null -> {
+                                            val response = suspendCancellableCoroutine { continuation ->
+                                                val timeout = NetworkUtils.CronetTimeout()
+                                                val request = cronetEngine.value!!.newUrlRequestBuilder(
+                                                    url,
+                                                    NetworkUtils.ByteArrayCronetCallback(continuation, timeout),
+                                                    cronetExecutor.value
+                                                ).build()
+                                                timeout.start(request, continuation)
+                                                request.start()
+                                                continuation.invokeOnCancellation {
+                                                    request.cancel()
+                                                    timeout.stop()
                                                 }
-                                            } else {
-                                                val response = suspendCoroutine<Pair<org.chromium.net.UrlResponseInfo, ByteArray>> { continuation ->
-                                                    cronetEngine.get().newUrlRequestBuilder(it, getByteArrayCronetCallback(continuation), cronetExecutor).build().start()
-                                                }
-                                                if (response.first.httpStatusCode in 200..299) {
-                                                    FileOutputStream(path).use {
-                                                        it.write(response.second)
-                                                    }
+                                            }
+                                            if (response.info.httpStatusCode in 200..299) {
+                                                FileOutputStream(path).use {
+                                                    it.write(response.body)
                                                 }
                                             }
                                         }
                                         else -> {
-                                            okHttpClient.newCall(Request.Builder().url(it).build()).execute().use { response ->
+                                            okHttpClient.value.newCall(Request.Builder().url(url).build()).executeAsync().use { response ->
                                                 if (response.isSuccessful) {
                                                     FileOutputStream(path).use { outputStream ->
                                                         response.body.byteStream().use { inputStream ->
@@ -154,7 +230,7 @@ class GamePagerViewModel @Inject constructor(
 
                             }
                         }
-                        localFollowsGame.saveFollow(LocalFollowGame(gameId, gameSlug, gameName, path))
+                        localGameFollowsRepository.save(LocalGameFollow(gameId, gameSlug, gameName, path))
                         _isFollowing.value = true
                         follow.value = Pair(true, null)
                     }
@@ -168,24 +244,24 @@ class GamePagerViewModel @Inject constructor(
     fun deleteFollowGame(gameId: String?, setting: Int, networkLibrary: String?, gqlHeaders: Map<String, String>, enableIntegrity: Boolean) {
         viewModelScope.launch {
             try {
-                if (setting == 0 && !gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                    val errorMessage = graphQLRepository.loadUnfollowGame(networkLibrary, gqlHeaders, gameId).also { response ->
-                        if (enableIntegrity && integrity.value == null) {
-                            response.errors?.find { it.message == "failed integrity check" }?.let {
-                                integrity.value = "unfollow"
-                                return@launch
+                if (!gameId.isNullOrBlank()) {
+                    if (setting == 0 && !gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        val errorMessage = graphQLRepository.loadUnfollowGame(networkLibrary, gqlHeaders, gameId).also { response ->
+                            if (enableIntegrity) {
+                                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                    integrity.emit("unfollow")
+                                    return@launch
+                                }
                             }
+                        }.errors?.firstOrNull()?.message
+                        if (!errorMessage.isNullOrBlank()) {
+                            follow.value = Pair(false, errorMessage)
+                        } else {
+                            _isFollowing.value = false
+                            follow.value = Pair(false, null)
                         }
-                    }.errors?.firstOrNull()?.message
-                    if (!errorMessage.isNullOrBlank()) {
-                        follow.value = Pair(false, errorMessage)
                     } else {
-                        _isFollowing.value = false
-                        follow.value = Pair(false, null)
-                    }
-                } else {
-                    if (gameId != null) {
-                        localFollowsGame.getFollowByGameId(gameId)?.let { localFollowsGame.deleteFollow(it) }
+                        localGameFollowsRepository.getById(gameId)?.let { localGameFollowsRepository.delete(it) }
                         _isFollowing.value = false
                         follow.value = Pair(false, null)
                     }
@@ -213,43 +289,54 @@ class GamePagerViewModel @Inject constructor(
                                         networkLibrary = networkLibrary,
                                         headers = helixHeaders,
                                         ids = listOf(gameId)
-                                    ).data.firstOrNull()?.boxArtUrl
+                                    ).data.firstOrNull()?.boxArtURL
                                 } else null
-                            }.takeIf { !it.isNullOrBlank() }?.let { TwitchApiHelper.getTemplateUrl(it, "game") }?.let {
+                            }.takeIf { !it.isNullOrBlank() }?.let { TwitchApiHelper.getGameBoxArt(it) }?.let { url ->
                                 when {
-                                    networkLibrary == "HttpEngine" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S) >= 7 && httpEngine != null -> {
-                                        val response = suspendCoroutine<Pair<UrlResponseInfo, ByteArray>> { continuation ->
-                                            httpEngine.get().newUrlRequestBuilder(it, cronetExecutor, HttpEngineUtils.byteArrayUrlCallback(continuation)).build().start()
+                                    networkLibrary == C.HTTP_ENGINE && httpEngine.value != null -> @SuppressLint("NewApi") {
+                                        val response = suspendCancellableCoroutine { continuation ->
+                                            val timeout = NetworkUtils.HttpEngineTimeout()
+                                            val request = httpEngine.value!!.newUrlRequestBuilder(
+                                                url,
+                                                cronetExecutor.value,
+                                                NetworkUtils.ByteArrayUrlCallback(continuation, timeout)
+                                            ).build()
+                                            timeout.start(request, continuation)
+                                            request.start()
+                                            continuation.invokeOnCancellation {
+                                                request.cancel()
+                                                timeout.stop()
+                                            }
                                         }
-                                        if (response.first.httpStatusCode in 200..299) {
+                                        if (response.info.httpStatusCode in 200..299) {
                                             FileOutputStream(path).use {
-                                                it.write(response.second)
+                                                it.write(response.body)
                                             }
                                         }
                                     }
-                                    networkLibrary == "Cronet" && cronetEngine != null -> {
-                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                                            val request = UrlRequestCallbacks.forByteArrayBody(RedirectHandlers.alwaysFollow())
-                                            cronetEngine.get().newUrlRequestBuilder(it, request.callback, cronetExecutor).build().start()
-                                            val response = request.future.get()
-                                            if (response.urlResponseInfo.httpStatusCode in 200..299) {
-                                                FileOutputStream(path).use {
-                                                    it.write(response.responseBody as ByteArray)
-                                                }
+                                    networkLibrary == C.CRONET && cronetEngine.value != null -> {
+                                        val response = suspendCancellableCoroutine { continuation ->
+                                            val timeout = NetworkUtils.CronetTimeout()
+                                            val request = cronetEngine.value!!.newUrlRequestBuilder(
+                                                url,
+                                                NetworkUtils.ByteArrayCronetCallback(continuation, timeout),
+                                                cronetExecutor.value
+                                            ).build()
+                                            timeout.start(request, continuation)
+                                            request.start()
+                                            continuation.invokeOnCancellation {
+                                                request.cancel()
+                                                timeout.stop()
                                             }
-                                        } else {
-                                            val response = suspendCoroutine<Pair<org.chromium.net.UrlResponseInfo, ByteArray>> { continuation ->
-                                                cronetEngine.get().newUrlRequestBuilder(it, getByteArrayCronetCallback(continuation), cronetExecutor).build().start()
-                                            }
-                                            if (response.first.httpStatusCode in 200..299) {
-                                                FileOutputStream(path).use {
-                                                    it.write(response.second)
-                                                }
+                                        }
+                                        if (response.info.httpStatusCode in 200..299) {
+                                            FileOutputStream(path).use {
+                                                it.write(response.body)
                                             }
                                         }
                                     }
                                     else -> {
-                                        okHttpClient.newCall(Request.Builder().url(it).build()).execute().use { response ->
+                                        okHttpClient.value.newCall(Request.Builder().url(url).build()).executeAsync().use { response ->
                                             if (response.isSuccessful) {
                                                 FileOutputStream(path).use { outputStream ->
                                                     response.body.byteStream().use { inputStream ->
@@ -265,13 +352,24 @@ class GamePagerViewModel @Inject constructor(
 
                         }
                     }
-                    localFollowsGame.getFollowByGameId(gameId)?.let {
-                        localFollowsGame.updateFollow(it.apply {
+                    localGameFollowsRepository.getById(gameId)?.let {
+                        localGameFollowsRepository.update(it.apply {
                             this.gameName = gameName
                             boxArt = path
                         })
                     }
                 }
+            }
+        }
+    }
+
+    companion object {
+        val GamePagerViewModelFactory = viewModelFactory {
+            initializer {
+                val savedStateHandle = createSavedStateHandle()
+                val application = (this[APPLICATION_KEY] as XtraApp)
+                val xtraModule = application.xtraModule
+                GamePagerViewModel(xtraModule.graphQLRepository, xtraModule.helixRepository, xtraModule.localGameFollowsRepository, xtraModule.httpEngine, xtraModule.cronetEngine, xtraModule.cronetExecutor, xtraModule.okHttpClient, savedStateHandle)
             }
         }
     }

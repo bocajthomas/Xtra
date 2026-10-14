@@ -19,23 +19,21 @@ import androidx.recyclerview.widget.RecyclerView
 import com.github.andreyasadchy.xtra.R
 import com.github.andreyasadchy.xtra.databinding.CommonRecyclerViewLayoutBinding
 import com.github.andreyasadchy.xtra.databinding.SortBarBinding
-import com.github.andreyasadchy.xtra.model.ui.SortChannel
+import com.github.andreyasadchy.xtra.model.ui.ChannelSort
 import com.github.andreyasadchy.xtra.model.ui.User
 import com.github.andreyasadchy.xtra.ui.common.FragmentHost
 import com.github.andreyasadchy.xtra.ui.common.PagedListFragment
 import com.github.andreyasadchy.xtra.ui.common.Scrollable
 import com.github.andreyasadchy.xtra.ui.common.Sortable
-import com.github.andreyasadchy.xtra.util.visible
-import dagger.hilt.android.AndroidEntryPoint
+import com.github.andreyasadchy.xtra.ui.following.channels.FollowedChannelsViewModel.Companion.FollowedChannelsViewModelFactory
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
-@AndroidEntryPoint
 class FollowedChannelsFragment : PagedListFragment(), Scrollable, Sortable, FollowedChannelsSortDialog.OnFilter {
 
     private var _binding: CommonRecyclerViewLayoutBinding? = null
     private val binding get() = _binding!!
-    private val viewModel: FollowedChannelsViewModel by viewModels()
+    private val viewModel: FollowedChannelsViewModel by viewModels { FollowedChannelsViewModelFactory }
     private lateinit var pagingAdapter: PagingDataAdapter<User, out RecyclerView.ViewHolder>
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -59,14 +57,14 @@ class FollowedChannelsFragment : PagedListFragment(), Scrollable, Sortable, Foll
     override fun initialize() {
         viewLifecycleOwner.lifecycleScope.launch {
             if (viewModel.filter.value == null) {
-                val sortValues = viewModel.getSortChannel("followed_channels")
+                val sortValues = viewModel.getChannelSort("followed_channels")
                 viewModel.setFilter(
                     sort = sortValues?.videoSort,
                     order = sortValues?.videoType,
                 )
-                viewModel.sortText.value = requireContext().getString(
+                viewModel.sortText.value = getString(
                     R.string.sort_and_order,
-                    requireContext().getString(
+                    getString(
                         when (viewModel.sort) {
                             FollowedChannelsSortDialog.SORT_FOLLOWED_AT -> R.string.time_followed
                             FollowedChannelsSortDialog.SORT_ALPHABETICALLY -> R.string.alphabetically
@@ -74,7 +72,7 @@ class FollowedChannelsFragment : PagedListFragment(), Scrollable, Sortable, Foll
                             else -> R.string.last_broadcast
                         }
                     ),
-                    requireContext().getString(
+                    getString(
                         when (viewModel.order) {
                             FollowedChannelsSortDialog.ORDER_DESC -> R.string.descending
                             FollowedChannelsSortDialog.ORDER_ASC -> R.string.ascending
@@ -93,7 +91,7 @@ class FollowedChannelsFragment : PagedListFragment(), Scrollable, Sortable, Foll
     }
 
     override fun setupSortBar(sortBar: SortBarBinding) {
-        sortBar.root.visible()
+        sortBar.root.visibility = View.VISIBLE
         sortBar.root.setOnClickListener {
             FollowedChannelsSortDialog.newInstance(
                 sort = viewModel.sort,
@@ -115,18 +113,18 @@ class FollowedChannelsFragment : PagedListFragment(), Scrollable, Sortable, Foll
                 if (changed) {
                     pagingAdapter.submitData(PagingData.empty())
                     viewModel.setFilter(sort, order)
-                    viewModel.sortText.value = requireContext().getString(R.string.sort_and_order, sortText, orderText)
+                    viewModel.sortText.value = getString(R.string.sort_and_order, sortText, orderText)
                 }
                 if (saveDefault) {
-                    val item = viewModel.getSortChannel("followed_channels")?.apply {
+                    val item = viewModel.getChannelSort("followed_channels")?.apply {
                         videoSort = sort
                         videoType = order
-                    } ?: SortChannel(
+                    } ?: ChannelSort(
                         id = "followed_channels",
                         videoSort = sort,
                         videoType = order
                     )
-                    viewModel.saveSortChannel(item)
+                    viewModel.saveChannelSort(item)
                 }
             }
         }
@@ -140,9 +138,11 @@ class FollowedChannelsFragment : PagedListFragment(), Scrollable, Sortable, Foll
         pagingAdapter.retry()
     }
 
-    override fun onIntegrityDialogCallback(callback: String?) {
-        if (callback == "refresh") {
-            pagingAdapter.refresh()
+    override fun onIntegrityTokenLoaded(callback: String?) {
+        when (callback) {
+            "refresh" -> {
+                pagingAdapter.refresh()
+            }
         }
     }
 

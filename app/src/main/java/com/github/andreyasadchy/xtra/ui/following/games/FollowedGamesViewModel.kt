@@ -2,24 +2,24 @@ package com.github.andreyasadchy.xtra.ui.following.games
 
 import android.content.Context
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.cachedIn
+import com.github.andreyasadchy.xtra.XtraApp
 import com.github.andreyasadchy.xtra.repository.GraphQLRepository
-import com.github.andreyasadchy.xtra.repository.LocalFollowGameRepository
+import com.github.andreyasadchy.xtra.repository.LocalGameFollowsRepository
 import com.github.andreyasadchy.xtra.repository.datasource.FollowedGamesDataSource
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
 import com.github.andreyasadchy.xtra.util.prefs
-import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
-import javax.inject.Inject
 
-@HiltViewModel
-class FollowedGamesViewModel @Inject constructor(
-    @ApplicationContext applicationContext: Context,
-    private val localFollowsGame: LocalFollowGameRepository,
+class FollowedGamesViewModel(
+    applicationContext: Context,
+    private val localGameFollowsRepository: LocalGameFollowsRepository,
     private val graphQLRepository: GraphQLRepository,
 ) : ViewModel() {
 
@@ -27,17 +27,21 @@ class FollowedGamesViewModel @Inject constructor(
         PagingConfig(pageSize = 30, prefetchDistance = 10, initialLoadSize = 30)
     ) {
         FollowedGamesDataSource(
-            localFollowsGame = localFollowsGame,
+            localGameFollowsRepository = localGameFollowsRepository,
             gqlHeaders = TwitchApiHelper.getGQLHeaders(applicationContext, true),
             graphQLRepository = graphQLRepository,
             enableIntegrity = applicationContext.prefs().getBoolean(C.ENABLE_INTEGRITY, false),
-            apiPref = (applicationContext.prefs().getString(C.API_PREFS_FOLLOWED_GAMES, null) ?: C.DEFAULT_API_PREFS_FOLLOWED_GAMES).split(',').mapNotNull {
-                val split = it.split(':')
-                val key = split[0]
-                val enabled = split[1] != "0"
-                if (enabled) key else null
-            },
-            networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+            networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
         )
     }.flow.cachedIn(viewModelScope)
+
+    companion object {
+        val FollowedGamesViewModelFactory = viewModelFactory {
+            initializer {
+                val application = (this[APPLICATION_KEY] as XtraApp)
+                val xtraModule = application.xtraModule
+                FollowedGamesViewModel(application.applicationContext, xtraModule.localGameFollowsRepository, xtraModule.graphQLRepository)
+            }
+        }
+    }
 }

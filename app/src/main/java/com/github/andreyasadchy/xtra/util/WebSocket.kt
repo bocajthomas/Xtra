@@ -2,8 +2,12 @@ package com.github.andreyasadchy.xtra.util
 
 import android.os.Build
 import android.util.Base64
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.BufferedWriter
@@ -25,11 +29,14 @@ import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.X509TrustManager
 import kotlin.concurrent.schedule
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.random.Random
+import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 
 class WebSocket(
     private val url: String,
-    private val trustManager: X509TrustManager?,
+    private val trustManager: Lazy<X509TrustManager>,
     private val listener: Listener,
     private val headers: Map<String, String>? = null,
     private val sendPings: Boolean = false,
@@ -42,32 +49,49 @@ class WebSocket(
     private var messageByteArray: ByteArray? = null
     private var useCompression = false
     private var nextFrameCompressed = false
-    var isActive = true
+    private var connectionAttempt = 0
+    private var delayReconnect = false
+    var coroutineScope: CoroutineScope? = null
 
     suspend fun start() = withContext(Dispatchers.IO) {
-        do {
+        while (isActive) {
             try {
-                connect()
+                connectionAttempt += 1
+                val error = connect()
+                if (error) {
+                    close()
+                    return@withContext
+                }
+                connectionAttempt = 0
                 var end = false
                 while (!end) {
                     end = readNextFrame()
                 }
+            } catch (e: CancellationException) {
+                ensureActive()
+            } catch (e: SSLHandshakeException) {
+                listener.onDisconnect(this@WebSocket, e.toString(), e.stackTraceToString())
+                close()
+                return@withContext
             } catch (e: Exception) {
-                if (e is SSLHandshakeException) {
-                    isActive = false
-                    listener.onFailure(this@WebSocket, e)
-                } else {
-                    if (socket?.isClosed != true) {
-                        listener.onFailure(this@WebSocket, e)
-                    }
+                if (socket?.isClosed != true) {
+                    listener.onDisconnect(this@WebSocket, e.toString(), e.stackTraceToString())
                 }
             }
             close()
-            delay(1000)
-        } while (isActive)
+            if (connectionAttempt >= 20) {
+                return@withContext
+            }
+            if (delayReconnect) {
+                delayReconnect = false
+                delay(1.minutes)
+            } else {
+                delay(1.seconds)
+            }
+        }
     }
 
-    private fun connect() {
+    suspend fun connect(): Boolean = withContext(Dispatchers.IO) {
         val urlWithoutScheme = url.substringAfter("://")
         val host = urlWithoutScheme.substringBefore("/")
         val path = urlWithoutScheme.substringAfter('/', "")
@@ -76,7 +100,7 @@ class WebSocket(
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.N -> SSLContext.getDefault().socketFactory
             else -> {
                 val sslContext = SSLContext.getInstance("TLSv1.3")
-                sslContext.init(null, arrayOf(trustManager), null)
+                sslContext.init(null, arrayOf(trustManager.value), null)
                 sslContext.socketFactory
             }
         }
@@ -103,9 +127,15 @@ class WebSocket(
         var validated = false
         var line = reader.readLine()
         if (!line.startsWith("HTTP/1.1 101", true)) {
-            isActive = false
-            throw Exception(line)
+            listener.onDisconnect(this@WebSocket, line)
+            if (line.startsWith("HTTP/1.1 429", true)) {
+                delayReconnect = true
+                return@withContext false
+            } else {
+                return@withContext true
+            }
         }
+        line = reader.readLine()
         while (!line.isNullOrBlank()) {
             when {
                 line.startsWith("Sec-WebSocket-Accept", true) -> {
@@ -125,27 +155,30 @@ class WebSocket(
             line = reader.readLine()
         }
         if (!validated) {
-            isActive = false
-            throw Exception()
+            listener.onDisconnect(this@WebSocket, "")
+            return@withContext true
         }
         if (sendPings) {
             startPingTimer()
         }
-        listener.onOpen(this)
+        listener.onConnect(this@WebSocket)
+        return@withContext false
     }
 
-    private fun startPingTimer() {
+    private suspend fun startPingTimer() = withContext(Dispatchers.IO) {
         pingTimer = Timer().apply {
             schedule(270000) {
-                if (isActive && socket?.isClosed != true) {
-                    writeControlFrame(OPCODE_PING, byteArrayOf())
-                    startPongTimer()
+                if (socket?.isClosed == false) {
+                    coroutineScope?.launch {
+                        writeControlFrame(OPCODE_PING, byteArrayOf())
+                        startPongTimer()
+                    }
                 }
             }
         }
     }
 
-    private fun startPongTimer() {
+    private suspend fun startPongTimer() = withContext(Dispatchers.IO) {
         pongTimer = Timer().apply {
             schedule(10000) {
                 try {
@@ -157,33 +190,77 @@ class WebSocket(
         }
     }
 
-    private fun readNextFrame(): Boolean {
+    suspend fun readNextFrame(): Boolean = withContext(Dispatchers.IO) {
         val firstByte = inputStream!!.read()
-        if (firstByte == -1) {
-            return true
+        if (firstByte < 0) {
+            return@withContext true
         }
         val isFinalFrame = firstByte and FIN_BIT != 0
         val compressed = useCompression && firstByte and COMPRESSED_BIT != 0
-        val opcode = firstByte and OPCODE_BIT
+        val opcode = firstByte and OPCODE
         val isControlFrame = firstByte and OPCODE_CONTROL_FRAME != 0
         val secondByte = inputStream!!.read()
-        val length = secondByte and LENGTH_BIT
-        val frameLength = when (length) {
-            PAYLOAD_SHORT -> {
-                val array = ByteArray(2)
-                inputStream?.read(array)
-                ByteBuffer.wrap(array).short.toInt()
+        if (secondByte < 0) {
+            return@withContext true
+        }
+        val lengthBytes = secondByte and LENGTH
+        val length = when (lengthBytes) {
+            LENGTH_SHORT -> {
+                val size = 2
+                val array = ByteArray(size)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    inputStream?.readNBytes(array, 0, size)
+                } else {
+                    inputStream?.let {
+                        var offset = 0
+                        while (offset < size) {
+                            val count = it.read(array, 0 + offset, size - offset)
+                            if (count < 0) {
+                                break
+                            }
+                            offset += count
+                        }
+                    }
+                }
+                ByteBuffer.wrap(array).short.toInt() and 0xffff
             }
-            PAYLOAD_LONG -> {
-                val array = ByteArray(8)
-                inputStream?.read(array)
+            LENGTH_LONG -> {
+                val size = 8
+                val array = ByteArray(size)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    inputStream?.readNBytes(array, 0, size)
+                } else {
+                    inputStream?.let {
+                        var offset = 0
+                        while (offset < size) {
+                            val count = it.read(array, 0 + offset, size - offset)
+                            if (count < 0) {
+                                break
+                            }
+                            offset += count
+                        }
+                    }
+                }
                 ByteBuffer.wrap(array).long.toInt()
             }
-            else -> length
+            else -> lengthBytes
         }
-        val data = ByteArray(frameLength)
-        if (frameLength > 0) {
-            inputStream?.read(data)
+        val data = ByteArray(length)
+        if (length > 0) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                inputStream?.readNBytes(data, 0, length)
+            } else {
+                inputStream?.let {
+                    var offset = 0
+                    while (offset < length) {
+                        val count = it.read(data, 0 + offset, length - offset)
+                        if (count < 0) {
+                            break
+                        }
+                        offset += count
+                    }
+                }
+            }
         }
         if (isControlFrame) {
             when (opcode) {
@@ -198,10 +275,8 @@ class WebSocket(
                     }
                 }
                 OPCODE_CLOSE -> {
-                    if (isActive) {
-                        val code = data.copyOf(2)
-                        writeControlFrame(OPCODE_CLOSE, code)
-                    }
+                    val code = data.copyOf(2)
+                    writeControlFrame(OPCODE_CLOSE, code)
                     close()
                 }
             }
@@ -228,7 +303,7 @@ class WebSocket(
                     }
                     if (isFinalFrame) {
                         nextFrameCompressed = false
-                        listener.onMessage(this, messageByteArray!!.decodeToString())
+                        listener.onMessage(this@WebSocket, messageByteArray!!.decodeToString())
                         messageByteArray = null
                     } else {
                         if (opcode != OPCODE_CONTINUATION) {
@@ -238,10 +313,10 @@ class WebSocket(
                 }
             }
         }
-        return false
+        return@withContext false
     }
 
-    private fun writeControlFrame(opcode: Int, data: ByteArray) {
+    private suspend fun writeControlFrame(opcode: Int, data: ByteArray) = withContext(Dispatchers.IO) {
         val output = ByteArrayOutputStream()
         val firstByte = FIN_BIT or opcode
         output.write(firstByte)
@@ -256,7 +331,9 @@ class WebSocket(
             }.toByteArray()
             output.write(maskedData)
         }
-        outputStream?.let { output.writeTo(it) }
+        if (socket?.isClosed == false) {
+            outputStream?.let { output.writeTo(it) }
+        }
     }
 
     suspend fun write(message: String) = withContext(Dispatchers.IO) {
@@ -282,18 +359,18 @@ class WebSocket(
         output.write(firstByte)
         val dataSize = data.size
         when {
-            dataSize <= PAYLOAD_BYTE_MAX -> {
+            dataSize <= LENGTH_BYTE_MAX -> {
                 val secondByte = MASKED_BIT or dataSize
                 output.write(secondByte)
             }
-            dataSize <= PAYLOAD_SHORT_MAX -> {
-                val secondByte = MASKED_BIT or PAYLOAD_SHORT
+            dataSize <= LENGTH_SHORT_MAX -> {
+                val secondByte = MASKED_BIT or LENGTH_SHORT
                 output.write(secondByte)
                 val sizeBytes = ByteBuffer.allocate(2).putShort(dataSize.toShort()).array()
                 output.write(sizeBytes)
             }
             else -> {
-                val secondByte = MASKED_BIT or PAYLOAD_LONG
+                val secondByte = MASKED_BIT or LENGTH_LONG
                 output.write(secondByte)
                 val sizeBytes = ByteBuffer.allocate(8).putLong(dataSize.toLong()).array()
                 output.write(sizeBytes)
@@ -310,11 +387,6 @@ class WebSocket(
         }
     }
 
-    suspend fun stop() = withContext(Dispatchers.IO) {
-        isActive = false
-        disconnect()
-    }
-
     suspend fun disconnect() = withContext(Dispatchers.IO) {
         pingTimer?.cancel()
         pongTimer?.cancel()
@@ -322,7 +394,7 @@ class WebSocket(
             try {
                 val currentSocket = socket
                 writeControlFrame(OPCODE_CLOSE, ByteBuffer.allocate(2).putShort(1000).array())
-                delay(5000)
+                delay(5.seconds)
                 currentSocket?.close()
             } catch (e: Exception) {
 
@@ -330,7 +402,7 @@ class WebSocket(
         }
     }
 
-    private fun close() {
+    private suspend fun close() = withContext(Dispatchers.IO) {
         pingTimer?.cancel()
         pongTimer?.cancel()
         try {
@@ -341,23 +413,23 @@ class WebSocket(
     }
 
     interface Listener {
-        fun onOpen(webSocket: WebSocket) {}
-        fun onMessage(webSocket: WebSocket, message: String) {}
-        fun onFailure(webSocket: WebSocket, throwable: Throwable) {}
+        suspend fun onConnect(webSocket: WebSocket) {}
+        suspend fun onMessage(webSocket: WebSocket, message: String) {}
+        suspend fun onDisconnect(webSocket: WebSocket, message: String, fullMsg: String? = null) {}
     }
 
     companion object {
         private const val ACCEPT_UUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
         private const val FIN_BIT = 128
         private const val COMPRESSED_BIT = 64
-        private const val OPCODE_BIT = 15
+        private const val OPCODE = 15
         private const val OPCODE_CONTROL_FRAME = 8
         private const val MASKED_BIT = 128
-        private const val LENGTH_BIT = 127
-        private const val PAYLOAD_BYTE_MAX = 125L
-        private const val PAYLOAD_SHORT = 126
-        private const val PAYLOAD_SHORT_MAX = 0xffffL
-        private const val PAYLOAD_LONG = 127
+        private const val LENGTH = 127
+        private const val LENGTH_SHORT = 126
+        private const val LENGTH_LONG = 127
+        private const val LENGTH_BYTE_MAX = 125
+        private const val LENGTH_SHORT_MAX = 0xffff
         private const val OPCODE_CONTINUATION = 0x0
         private const val OPCODE_TEXT = 0x1
         private const val OPCODE_CLOSE = 0x8

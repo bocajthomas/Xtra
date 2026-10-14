@@ -20,9 +20,10 @@ import androidx.recyclerview.widget.RecyclerView
 import com.github.andreyasadchy.xtra.R
 import com.github.andreyasadchy.xtra.databinding.CommonRecyclerViewLayoutBinding
 import com.github.andreyasadchy.xtra.databinding.SortBarBinding
+import com.github.andreyasadchy.xtra.model.ui.ChannelSort
 import com.github.andreyasadchy.xtra.model.ui.Clip
-import com.github.andreyasadchy.xtra.model.ui.SortChannel
 import com.github.andreyasadchy.xtra.ui.channel.ChannelPagerFragmentArgs
+import com.github.andreyasadchy.xtra.ui.channel.clips.ChannelClipsViewModel.Companion.ChannelClipsViewModelFactory
 import com.github.andreyasadchy.xtra.ui.common.ClipsAdapter
 import com.github.andreyasadchy.xtra.ui.common.FragmentHost
 import com.github.andreyasadchy.xtra.ui.common.IntegrityDialog
@@ -31,19 +32,15 @@ import com.github.andreyasadchy.xtra.ui.common.Scrollable
 import com.github.andreyasadchy.xtra.ui.common.Sortable
 import com.github.andreyasadchy.xtra.ui.common.VideosSortDialog
 import com.github.andreyasadchy.xtra.ui.download.DownloadDialog
-import com.github.andreyasadchy.xtra.util.gone
-import com.github.andreyasadchy.xtra.util.visible
-import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
-@AndroidEntryPoint
 class ChannelClipsFragment : PagedListFragment(), Scrollable, Sortable, VideosSortDialog.OnFilter {
 
     private var _binding: CommonRecyclerViewLayoutBinding? = null
     private val binding get() = _binding!!
     private val args: ChannelPagerFragmentArgs by navArgs()
-    private val viewModel: ChannelClipsViewModel by viewModels()
+    private val viewModel: ChannelClipsViewModel by viewModels { ChannelClipsViewModelFactory }
     private lateinit var pagingAdapter: PagingDataAdapter<Clip, out RecyclerView.ViewHolder>
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -54,21 +51,22 @@ class ChannelClipsFragment : PagedListFragment(), Scrollable, Sortable, VideosSo
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         val showDialog: (Clip) -> Unit = {
-            DownloadDialog.newInstance(
-                clipId = it.id,
-                title = it.title,
-                uploadDate = it.uploadDate,
-                duration = it.duration,
-                videoId = it.videoId,
-                vodOffset = it.vodOffset,
+            DownloadDialog.newClipInstance(
+                id = it.id,
                 channelId = it.channelId,
                 channelLogin = it.channelLogin,
                 channelName = it.channelName,
-                channelLogo = it.channelLogo,
-                thumbnail = it.thumbnail,
+                channelImage = it.channelImage,
                 gameId = it.gameId,
                 gameSlug = it.gameSlug,
                 gameName = it.gameName,
+                title = it.title,
+                thumbnail = it.thumbnail,
+                createdAt = it.createdAt,
+                durationSeconds = it.durationSeconds,
+                videoId = it.videoId,
+                videoOffsetSeconds = it.videoOffsetSeconds,
+                videoCreatedAt = it.videoCreatedAt,
             ).show(childFragmentManager, null)
         }
         pagingAdapter = ClipsAdapter(this, showDialog, showChannel = false)
@@ -85,14 +83,14 @@ class ChannelClipsFragment : PagedListFragment(), Scrollable, Sortable, VideosSo
     override fun initialize() {
         viewLifecycleOwner.lifecycleScope.launch {
             if (viewModel.filter.value == null) {
-                val sortValues = args.channelId?.let { viewModel.getSortChannel(it) } ?: viewModel.getSortChannel("default")
+                val sortValues = args.channelId?.let { viewModel.getChannelSort(it) } ?: viewModel.getChannelSort("default")
                 viewModel.setFilter(
                     period = sortValues?.clipPeriod,
                 )
-                viewModel.sortText.value = requireContext().getString(
+                viewModel.sortText.value = getString(
                     R.string.sort_and_period,
-                    requireContext().getString(R.string.view_count),
-                    requireContext().getString(
+                    getString(R.string.view_count),
+                    getString(
                         when (viewModel.period) {
                             VideosSortDialog.PERIOD_DAY -> R.string.today
                             VideosSortDialog.PERIOD_WEEK -> R.string.this_week
@@ -113,13 +111,13 @@ class ChannelClipsFragment : PagedListFragment(), Scrollable, Sortable, VideosSo
     }
 
     override fun setupSortBar(sortBar: SortBarBinding) {
-        sortBar.root.visible()
+        sortBar.root.visibility = View.VISIBLE
         sortBar.root.setOnClickListener {
             viewLifecycleOwner.lifecycleScope.launch {
                 VideosSortDialog.newInstance(
                     sort = VideosSortDialog.SORT_VIEWS,
                     period = viewModel.period,
-                    saved = args.channelId?.let { viewModel.getSortChannel(it) } != null
+                    saved = args.channelId?.let { viewModel.getChannelSort(it) } != null
                 ).show(childFragmentManager, null)
             }
         }
@@ -136,30 +134,30 @@ class ChannelClipsFragment : PagedListFragment(), Scrollable, Sortable, VideosSo
         if ((parentFragment as? FragmentHost)?.currentFragment == this) {
             viewLifecycleOwner.lifecycleScope.launch {
                 if (changed) {
-                    binding.scrollTop.gone()
+                    binding.scrollTop.visibility = View.GONE
                     pagingAdapter.submitData(PagingData.empty())
                     viewModel.setFilter(period)
-                    viewModel.sortText.value = requireContext().getString(R.string.sort_and_period, sortText, periodText)
+                    viewModel.sortText.value = getString(R.string.sort_and_period, sortText, periodText)
                 }
                 if (saveSort) {
                     args.channelId?.let { id ->
-                        val item = viewModel.getSortChannel(id)?.apply {
+                        val item = viewModel.getChannelSort(id)?.apply {
                             clipPeriod = period
-                        } ?: SortChannel(
+                        } ?: ChannelSort(
                             id = id,
                             clipPeriod = period
                         )
-                        viewModel.saveSortChannel(item)
+                        viewModel.saveChannelSort(item)
                     }
                 }
                 if (saveDefault) {
-                    val item = viewModel.getSortChannel("default")?.apply {
+                    val item = viewModel.getChannelSort("default")?.apply {
                         clipPeriod = period
-                    } ?: SortChannel(
+                    } ?: ChannelSort(
                         id = "default",
                         clipPeriod = period
                     )
-                    viewModel.saveSortChannel(item)
+                    viewModel.saveChannelSort(item)
                 }
             }
         }
@@ -168,7 +166,7 @@ class ChannelClipsFragment : PagedListFragment(), Scrollable, Sortable, VideosSo
     override fun deleteSavedSort() {
         if ((parentFragment as? FragmentHost)?.currentFragment == this) {
             viewLifecycleOwner.lifecycleScope.launch {
-                args.channelId?.let { viewModel.getSortChannel(it) }?.let { viewModel.deleteSortChannel(it) }
+                args.channelId?.let { viewModel.getChannelSort(it) }?.let { viewModel.deleteChannelSort(it) }
             }
         }
     }
@@ -181,10 +179,12 @@ class ChannelClipsFragment : PagedListFragment(), Scrollable, Sortable, VideosSo
         pagingAdapter.retry()
     }
 
-    override fun onIntegrityDialogCallback(callback: String?) {
-        (parentFragment as? IntegrityDialog.CallbackListener)?.onIntegrityDialogCallback("refresh")
-        if (callback == "refresh") {
-            pagingAdapter.refresh()
+    override fun onIntegrityTokenLoaded(callback: String?) {
+        (parentFragment as? IntegrityDialog.Listener)?.onIntegrityTokenLoaded("refresh")
+        when (callback) {
+            "refresh" -> {
+                pagingAdapter.refresh()
+            }
         }
     }
 

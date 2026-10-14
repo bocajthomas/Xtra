@@ -3,35 +3,36 @@ package com.github.andreyasadchy.xtra.ui.game.streams
 import android.content.Context
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
+import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.cachedIn
+import com.github.andreyasadchy.xtra.XtraApp
+import com.github.andreyasadchy.xtra.graphql.type.Language
+import com.github.andreyasadchy.xtra.graphql.type.StreamSort
+import com.github.andreyasadchy.xtra.model.ui.GameSort
 import com.github.andreyasadchy.xtra.model.ui.SavedFilter
-import com.github.andreyasadchy.xtra.model.ui.SortGame
+import com.github.andreyasadchy.xtra.repository.GameSortRepository
 import com.github.andreyasadchy.xtra.repository.GraphQLRepository
 import com.github.andreyasadchy.xtra.repository.HelixRepository
 import com.github.andreyasadchy.xtra.repository.SavedFiltersRepository
-import com.github.andreyasadchy.xtra.repository.SortGameRepository
 import com.github.andreyasadchy.xtra.repository.datasource.GameStreamsDataSource
-import com.github.andreyasadchy.xtra.type.Language
-import com.github.andreyasadchy.xtra.type.StreamSort
 import com.github.andreyasadchy.xtra.ui.common.StreamsSortDialog
 import com.github.andreyasadchy.xtra.ui.game.GamePagerFragmentArgs
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
 import com.github.andreyasadchy.xtra.util.prefs
-import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
-import javax.inject.Inject
 
-@HiltViewModel
-class GameStreamsViewModel @Inject constructor(
-    @ApplicationContext applicationContext: Context,
-    private val sortGameRepository: SortGameRepository,
+class GameStreamsViewModel(
+    applicationContext: Context,
+    private val gameSortRepository: GameSortRepository,
     private val savedFiltersRepository: SavedFiltersRepository,
     private val graphQLRepository: GraphQLRepository,
     private val helixRepository: HelixRepository,
@@ -44,14 +45,14 @@ class GameStreamsViewModel @Inject constructor(
     val filtersText = MutableStateFlow<CharSequence?>(null)
 
     val sort: String
-        get() = filter.value?.sort ?: StreamsSortDialog.Companion.SORT_VIEWERS
+        get() = filter.value?.sort ?: StreamsSortDialog.SORT_VIEWERS
     val tags: Array<String>
         get() = filter.value?.tags ?: emptyArray()
     val languages: Array<String>
         get() = filter.value?.languages ?: emptyArray()
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    val flow = filter.flatMapLatest { filter ->
+    val flow = filter.flatMapLatest {
         Pager(
             if (applicationContext.prefs().getString(C.COMPACT_STREAMS, "disabled") == "all") {
                 PagingConfig(pageSize = 30, prefetchDistance = 10, initialLoadSize = 30)
@@ -67,16 +68,16 @@ class GameStreamsViewModel @Inject constructor(
                     Language.entries.find { it.rawValue == language }
                 },
                 gqlQuerySort = when (sort) {
-                    StreamsSortDialog.Companion.SORT_VIEWERS -> StreamSort.VIEWER_COUNT
-                    StreamsSortDialog.Companion.SORT_VIEWERS_ASC -> StreamSort.VIEWER_COUNT_ASC
-                    StreamsSortDialog.Companion.RECENT -> StreamSort.RECENT
+                    StreamsSortDialog.SORT_VIEWERS -> StreamSort.VIEWER_COUNT
+                    StreamsSortDialog.SORT_VIEWERS_ASC -> StreamSort.VIEWER_COUNT_ASC
+                    StreamsSortDialog.RECENT -> StreamSort.RECENT
                     else -> StreamSort.VIEWER_COUNT
                 },
                 gqlLanguages = languages.ifEmpty { null }?.toList(),
                 gqlSort = when (sort) {
-                    StreamsSortDialog.Companion.SORT_VIEWERS -> "VIEWER_COUNT"
-                    StreamsSortDialog.Companion.SORT_VIEWERS_ASC -> "VIEWER_COUNT_ASC"
-                    StreamsSortDialog.Companion.RECENT -> "RECENT"
+                    StreamsSortDialog.SORT_VIEWERS -> "VIEWER_COUNT"
+                    StreamsSortDialog.SORT_VIEWERS_ASC -> "VIEWER_COUNT_ASC"
+                    StreamsSortDialog.RECENT -> "RECENT"
                     else -> "VIEWER_COUNT"
                 },
                 tags = tags.ifEmpty { null }?.toList(),
@@ -85,31 +86,25 @@ class GameStreamsViewModel @Inject constructor(
                 helixHeaders = TwitchApiHelper.getHelixHeaders(applicationContext),
                 helixRepository = helixRepository,
                 enableIntegrity = applicationContext.prefs().getBoolean(C.ENABLE_INTEGRITY, false),
-                apiPref = (applicationContext.prefs().getString(C.API_PREFS_GAME_STREAMS, null) ?: C.DEFAULT_API_PREFS_GAME_STREAMS).split(',').mapNotNull {
-                    val split = it.split(':')
-                    val key = split[0]
-                    val enabled = split[1] != "0"
-                    if (enabled) key else null
-                },
-                networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+                networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
             )
         }.flow
     }.cachedIn(viewModelScope)
 
-    suspend fun getSortGame(id: String): SortGame? {
-        return sortGameRepository.getById(id)
+    suspend fun getGameSort(id: String): GameSort? {
+        return gameSortRepository.getById(id)
     }
 
-    suspend fun saveSortGame(item: SortGame) {
-        sortGameRepository.save(item)
+    suspend fun saveGameSort(item: GameSort) {
+        gameSortRepository.save(item)
     }
 
-    suspend fun deleteSortGame(item: SortGame) {
-        sortGameRepository.delete(item)
+    suspend fun deleteGameSort(item: GameSort) {
+        gameSortRepository.delete(item)
     }
 
     suspend fun saveFilters(item: SavedFilter) {
-        savedFiltersRepository.saveFilter(item)
+        savedFiltersRepository.save(item)
     }
 
     fun setFilter(sort: String?, tags: Array<String>?, languages: Array<String>?) {
@@ -121,4 +116,15 @@ class GameStreamsViewModel @Inject constructor(
         val tags: Array<String>?,
         val languages: Array<String>?,
     )
+
+    companion object {
+        val GameStreamsViewModelFactory = viewModelFactory {
+            initializer {
+                val savedStateHandle = createSavedStateHandle()
+                val application = (this[APPLICATION_KEY] as XtraApp)
+                val xtraModule = application.xtraModule
+                GameStreamsViewModel(application.applicationContext, xtraModule.gameSortRepository, xtraModule.savedFiltersRepository, xtraModule.graphQLRepository, xtraModule.helixRepository, savedStateHandle)
+            }
+        }
+    }
 }

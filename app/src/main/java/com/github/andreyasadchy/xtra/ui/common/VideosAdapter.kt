@@ -29,9 +29,8 @@ import com.github.andreyasadchy.xtra.ui.game.GamePagerFragmentDirections
 import com.github.andreyasadchy.xtra.ui.main.MainActivity
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
-import com.github.andreyasadchy.xtra.util.gone
 import com.github.andreyasadchy.xtra.util.prefs
-import com.github.andreyasadchy.xtra.util.visible
+import kotlin.time.Instant
 
 class VideosAdapter(
     private val fragment: Fragment,
@@ -46,9 +45,9 @@ class VideosAdapter(
 
         override fun areContentsTheSame(oldItem: Video, newItem: Video): Boolean =
             oldItem.viewCount == newItem.viewCount &&
-                    oldItem.thumbnailUrl == newItem.thumbnailUrl &&
+                    oldItem.thumbnailURL == newItem.thumbnailURL &&
                     oldItem.title == newItem.title &&
-                    oldItem.duration == newItem.duration
+                    oldItem.durationSeconds == newItem.durationSeconds
     }) {
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PagingViewHolder {
@@ -85,12 +84,24 @@ class VideosAdapter(
             with(binding) {
                 if (item != null) {
                     val context = fragment.requireContext()
-                    val getDuration = item.duration?.let { TwitchApiHelper.getDuration(it) }
                     val position = item.id?.toLongOrNull()?.let { id -> positions?.find { it.id == id }?.position }
+                    val startFromBeginning = position != null && item.durationSeconds != null && item.durationSeconds > 0 && position >= (item.durationSeconds * 1000)
+                            && item.thumbnail.let { it != null && !it.startsWith("https://vod-secure.twitch.tv/_404/404_processing") }
                     root.setOnClickListener {
-                        (fragment.activity as MainActivity).startVideo(item, position)
+                        (fragment.activity as MainActivity).startVideo(
+                            item,
+                            if (startFromBeginning) {
+                                0
+                            } else {
+                                position
+                            },
+                            startFromBeginning
+                        )
                     }
-                    root.setOnLongClickListener { showDownloadDialog(item); true }
+                    root.setOnLongClickListener {
+                        showDownloadDialog(item)
+                        true
+                    }
                     fragment.requireContext().imageLoader.enqueue(
                         ImageRequest.Builder(fragment.requireContext()).apply {
                             data(item.thumbnail)
@@ -99,50 +110,52 @@ class VideosAdapter(
                             target(thumbnail)
                         }.build()
                     )
-                    if (item.uploadDate != null) {
-                        val text = TwitchApiHelper.formatTimeString(context, item.uploadDate)
+                    if (item.createdAt != null) {
+                        val text = Instant.parseOrNull(item.createdAt)?.toEpochMilliseconds()?.takeIf { ms -> ms > 0 }?.let {
+                            TwitchApiHelper.formatDate(context, it)
+                        }
                         if (text != null) {
-                            date.visible()
+                            date.visibility = View.VISIBLE
                             date.text = text
                         } else {
-                            date.gone()
+                            date.visibility = View.GONE
                         }
                     } else {
-                        date.gone()
+                        date.visibility = View.GONE
                     }
                     if (item.viewCount != null) {
-                        views.visible()
+                        views.visibility = View.VISIBLE
                         val count = item.viewCount
                         views.text = context.resources.getQuantityString(
                             R.plurals.views,
                             count,
-                            TwitchApiHelper.formatCount(count, context.prefs().getBoolean(C.UI_TRUNCATEVIEWCOUNT, true))
+                            TwitchApiHelper.formatCount(count, context.prefs().getBoolean(C.UI_TRUNCATE_VIEW_COUNT, true))
                         )
                     } else {
-                        views.gone()
+                        views.visibility = View.GONE
                     }
-                    if (getDuration != null) {
-                        duration.visible()
-                        duration.text = DateUtils.formatElapsedTime(getDuration)
+                    if (item.durationSeconds != null) {
+                        duration.visibility = View.VISIBLE
+                        duration.text = DateUtils.formatElapsedTime(item.durationSeconds.toLong())
                     } else {
-                        duration.gone()
+                        duration.visibility = View.GONE
                     }
                     if (item.type != null) {
                         val text = TwitchApiHelper.getType(context, item.type)
                         if (text != null) {
-                            type.visible()
+                            type.visibility = View.VISIBLE
                             type.text = text
                         } else {
-                            type.gone()
+                            type.visibility = View.GONE
                         }
                     } else {
-                        type.gone()
+                        type.visibility = View.GONE
                     }
-                    if (position != null && getDuration != null && getDuration > 0L) {
-                        progressBar.progress = (position / (getDuration * 10)).toInt()
-                        progressBar.visible()
+                    if (position != null && item.durationSeconds != null && item.durationSeconds > 0L) {
+                        progressBar.progress = (position / (item.durationSeconds * 10)).toInt()
+                        progressBar.visibility = View.VISIBLE
                     } else {
-                        progressBar.gone()
+                        progressBar.visibility = View.GONE
                     }
                     if (showChannel) {
                         val channelListener: (View) -> Unit = {
@@ -151,16 +164,16 @@ class VideosAdapter(
                                     channelId = item.channelId,
                                     channelLogin = item.channelLogin,
                                     channelName = item.channelName,
-                                    channelLogo = item.channelLogo,
+                                    channelImage = item.channelImage,
                                 )
                             )
                         }
-                        if (item.channelLogo != null) {
-                            userImage.visible()
+                        if (item.channelImage != null) {
+                            userImage.visibility = View.VISIBLE
                             fragment.requireContext().imageLoader.enqueue(
                                 ImageRequest.Builder(fragment.requireContext()).apply {
-                                    data(item.channelLogo)
-                                    if (context.prefs().getBoolean(C.UI_ROUNDUSERIMAGE, true)) {
+                                    data(item.channelImage)
+                                    if (context.prefs().getBoolean(C.UI_ROUND_USER_IMAGE, true)) {
                                         transformations(CircleCropTransformation())
                                     }
                                     crossfade(true)
@@ -169,10 +182,10 @@ class VideosAdapter(
                             )
                             userImage.setOnClickListener(channelListener)
                         } else {
-                            userImage.gone()
+                            userImage.visibility = View.GONE
                         }
                         if (item.channelName != null) {
-                            username.visible()
+                            username.visibility = View.VISIBLE
                             username.text = if (item.channelLogin != null && !item.channelLogin.equals(item.channelName, true)) {
                                 when (context.prefs().getString(C.UI_NAME_DISPLAY, "0")) {
                                     "0" -> "${item.channelName}(${item.channelLogin})"
@@ -184,22 +197,22 @@ class VideosAdapter(
                             }
                             username.setOnClickListener(channelListener)
                         } else {
-                            username.gone()
+                            username.visibility = View.GONE
                         }
                     } else {
-                        userImage.gone()
-                        username.gone()
+                        userImage.visibility = View.GONE
+                        username.visibility = View.GONE
                     }
-                    if (item.title != null && item.title != "") {
-                        title.visible()
+                    if (!item.title.isNullOrBlank()) {
+                        title.visibility = View.VISIBLE
                         title.text = item.title.trim()
                     } else {
-                        title.gone()
+                        title.visibility = View.GONE
                     }
                     if (showGame && item.gameName != null) {
                         val gameListener: (View) -> Unit = {
                             fragment.findNavController().navigate(
-                                if (context.prefs().getBoolean(C.UI_GAMEPAGER, true)) {
+                                if (context.prefs().getBoolean(C.UI_GAME_PAGER, true)) {
                                     GamePagerFragmentDirections.actionGlobalGamePagerFragment(
                                         gameId = item.gameId,
                                         gameSlug = item.gameSlug,
@@ -214,11 +227,11 @@ class VideosAdapter(
                                 }
                             )
                         }
-                        gameName.visible()
+                        gameName.visibility = View.VISIBLE
                         gameName.text = item.gameName
                         gameName.setOnClickListener(gameListener)
                     } else {
-                        gameName.gone()
+                        gameName.visibility = View.GONE
                     }
                     options.setOnClickListener { it ->
                         PopupMenu(context, it).apply {

@@ -4,6 +4,7 @@ import androidx.paging.PagingSource
 import androidx.paging.PagingState
 import com.github.andreyasadchy.xtra.model.ui.Stream
 import com.github.andreyasadchy.xtra.repository.GraphQLRepository
+import com.github.andreyasadchy.xtra.util.C
 
 class TeamMembersDataSource(
     private val teamName: String?,
@@ -22,7 +23,7 @@ class TeamMembersDataSource(
             if (getLiveMembers) {
                 val response = graphQLRepository.loadQueryTeamLiveMembers(networkLibrary, gqlHeaders, teamName!!, params.loadSize, liveOffset)
                 if (enableIntegrity) {
-                    response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
+                    response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
                 }
                 val data = response.data!!.team!!.liveMembers
                 val items = data?.edges
@@ -33,14 +34,14 @@ class TeamMembersDataSource(
                             channelId = it.id,
                             channelLogin = it.login,
                             channelName = it.displayName,
+                            channelImageURL = it.profileImageURL,
                             gameId = it.stream?.game?.id,
                             gameSlug = it.stream?.game?.slug,
                             gameName = it.stream?.game?.displayName,
                             title = it.stream?.broadcaster?.broadcastSettings?.title,
+                            createdAt = it.stream?.createdAt?.toString(),
                             viewerCount = it.stream?.viewersCount,
-                            startedAt = it.stream?.createdAt?.toString(),
-                            profileImageUrl = it.profileImageURL,
-                            tags = it.stream?.freeformTags?.mapNotNull { tag -> tag.name }
+                            tags = it.stream?.freeformTags?.mapNotNull { tag -> tag.name },
                         )
                     }
                 } ?: emptyList()
@@ -65,14 +66,14 @@ class TeamMembersDataSource(
                                     channelId = it.id,
                                     channelLogin = it.login,
                                     channelName = it.displayName,
+                                    channelImageURL = it.profileImageURL,
                                     gameId = it.stream?.game?.id,
                                     gameSlug = it.stream?.game?.slug,
                                     gameName = it.stream?.game?.displayName,
                                     title = it.stream?.broadcaster?.broadcastSettings?.title,
+                                    createdAt = it.stream?.createdAt?.toString(),
                                     viewerCount = it.stream?.viewersCount,
-                                    startedAt = it.stream?.createdAt?.toString(),
-                                    profileImageUrl = it.profileImageURL,
-                                    tags = it.stream?.freeformTags?.mapNotNull { tag -> tag.name }
+                                    tags = it.stream?.freeformTags?.mapNotNull { tag -> tag.name },
                                 )
                             } else null
                         }
@@ -90,7 +91,7 @@ class TeamMembersDataSource(
             } else {
                 val response = graphQLRepository.loadQueryTeamMembers(networkLibrary, gqlHeaders, teamName!!, params.loadSize, offset)
                 if (enableIntegrity) {
-                    response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
+                    response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
                 }
                 val data = response.data!!.team!!.members
                 val items = data?.edges
@@ -102,14 +103,14 @@ class TeamMembersDataSource(
                                 channelId = it.id,
                                 channelLogin = it.login,
                                 channelName = it.displayName,
+                                channelImageURL = it.profileImageURL,
                                 gameId = it.stream?.game?.id,
                                 gameSlug = it.stream?.game?.slug,
                                 gameName = it.stream?.game?.displayName,
                                 title = it.stream?.broadcaster?.broadcastSettings?.title,
+                                createdAt = it.stream?.createdAt?.toString(),
                                 viewerCount = it.stream?.viewersCount,
-                                startedAt = it.stream?.createdAt?.toString(),
-                                profileImageUrl = it.profileImageURL,
-                                tags = it.stream?.freeformTags?.mapNotNull { tag -> tag.name }
+                                tags = it.stream?.freeformTags?.mapNotNull { tag -> tag.name },
                             )
                         } else null
                     }

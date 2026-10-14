@@ -1,37 +1,48 @@
 package com.github.andreyasadchy.xtra.ui.chat
 
 import com.github.andreyasadchy.xtra.model.chat.ChatMessage
+import com.github.andreyasadchy.xtra.model.chat.VideoChatMessage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import javax.inject.Inject
 import kotlin.math.max
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Instant
 
-class ChatReplayManagerLocal @Inject constructor(
+class ChatReplayManagerLocal(
+    private val createdAt: Long?,
     private val getCurrentPosition: () -> Long?,
     private val getCurrentSpeed: () -> Float?,
-    private val onMessage: (ChatMessage) -> Unit,
-    private val clearMessages: () -> Unit,
     private val coroutineScope: CoroutineScope,
+    private val listener: ChatReplayManager.Listener,
 ) {
-
-    private var messages: List<ChatMessage> = emptyList()
+    private var liveMessages: List<ChatMessage>? = null
+    private var messages: List<VideoChatMessage>? = null
     private var startTime = 0L
-    private val list = mutableListOf<ChatMessage>()
+    private val liveList = mutableListOf<ChatMessage>()
+    private val list = mutableListOf<VideoChatMessage>()
     private var started = false
     private var isLoading = false
+    private var useOffsetSeconds = false
     private var loadJob: Job? = null
     private var messageJob: Job? = null
     private var lastCheckedPosition = 0L
     private var playbackSpeed: Float? = null
     var isActive = true
 
-    fun setMessages(newMessages: List<ChatMessage>, newStartTime: Long) {
-        messages = newMessages
-        startTime = newStartTime
+    fun setMessages(newLiveMessages: List<ChatMessage>, newMessages: List<VideoChatMessage>, newStartTime: Long) {
+        if (newLiveMessages.isNotEmpty()) {
+            liveMessages = newLiveMessages
+            if (createdAt != null) {
+                startTime = newStartTime - createdAt
+            }
+        } else {
+            messages = newMessages
+            startTime = newStartTime
+        }
         if (started) {
             start()
         }
@@ -40,7 +51,7 @@ class ChatReplayManagerLocal @Inject constructor(
     fun startLoad() {
         if (!started) {
             started = true
-            if (messages.isNotEmpty()) {
+            if (!liveMessages.isNullOrEmpty() || !messages.isNullOrEmpty()) {
                 start()
             }
         }
@@ -50,8 +61,11 @@ class ChatReplayManagerLocal @Inject constructor(
         val currentPosition = getCurrentPosition() ?: 0
         lastCheckedPosition = currentPosition
         playbackSpeed = getCurrentSpeed()
+        liveList.clear()
         list.clear()
-        clearMessages()
+        coroutineScope.launch {
+            listener.clearMessages()
+        }
         load(currentPosition + startTime)
     }
 
@@ -66,7 +80,45 @@ class ChatReplayManagerLocal @Inject constructor(
         loadJob = coroutineScope.launch(Dispatchers.IO) {
             try {
                 messageJob?.cancel()
-                list.addAll(messages.filter { it.timestamp != null && it.timestamp >= (max(position - 20000, 0)) })
+                if (!liveMessages.isNullOrEmpty()) {
+                    liveMessages?.let { messages ->
+                        liveList.addAll(
+                            messages.filter { message ->
+                                val messageOffset = if (createdAt != null && message.timestamp != null) {
+                                    message.timestamp - createdAt
+                                } else {
+                                    null
+                                }
+                                messageOffset != null && messageOffset >= (max(position - 20000, 0))
+                            }
+                        )
+                    }
+                } else {
+                    messages?.let { messages ->
+                        // VideoComment createdAt is wrong on highlights
+                        useOffsetSeconds = if (createdAt != null) {
+                            val first = messages.firstOrNull()
+                            val last = messages.lastOrNull()
+                            if (first != last && first?.createdAt != null && last?.createdAt != null) {
+                                if (first.offsetSeconds == null || last.offsetSeconds == null || first.offsetSeconds != last.offsetSeconds) {
+                                    val firstCreatedAt = Instant.parseOrNull(first.createdAt)?.epochSeconds?.takeIf { it > 0 }
+                                    val lastCreatedAt = Instant.parseOrNull(last.createdAt)?.epochSeconds?.takeIf { it > 0 }
+                                    firstCreatedAt == null || lastCreatedAt == null || firstCreatedAt == lastCreatedAt
+                                } else true
+                            } else true
+                        } else true
+                        list.addAll(
+                            messages.filter { message ->
+                                val messageOffset = if (!useOffsetSeconds && createdAt != null && !message.createdAt.isNullOrBlank()) {
+                                    Instant.parseOrNull(message.createdAt)?.toEpochMilliseconds()?.takeIf { ms -> ms > 0 }?.minus(createdAt)
+                                } else {
+                                    null
+                                } ?: message.offsetSeconds?.times(1000L)
+                                messageOffset != null && messageOffset >= (max(position - 20000, 0))
+                            }
+                        )
+                    }
+                }
                 isLoading = false
                 startJob()
             } catch (e: Exception) {
@@ -78,54 +130,95 @@ class ChatReplayManagerLocal @Inject constructor(
     private fun startJob() {
         messageJob = coroutineScope.launch {
             while (isActive) {
-                val message = list.firstOrNull() ?: break
-                if (message.timestamp != null) {
-                    var currentPosition: Long
-                    val messageOffset = message.timestamp
-                    while (
-                        (getCurrentPosition() ?: 0).let { position ->
-                            lastCheckedPosition = position
-                            currentPosition = position + startTime
-                            currentPosition < messageOffset
+                if (!liveMessages.isNullOrEmpty()) {
+                    val message = liveList.firstOrNull() ?: break
+                    val messageOffset = if (createdAt != null && message.timestamp != null) {
+                        message.timestamp - createdAt
+                    } else {
+                        null
+                    }
+                    if (messageOffset != null) {
+                        var currentPosition: Long
+                        while (
+                            (getCurrentPosition() ?: 0).let { position ->
+                                lastCheckedPosition = position
+                                currentPosition = position + startTime
+                                currentPosition < messageOffset
+                            }
+                        ) {
+                            val timeLeft = (messageOffset - currentPosition).div(playbackSpeed ?: 1f).toLong()
+                            val delay = max(timeLeft, 1) // ExoPlayer getCurrentPosition freezes the app if it's called too rapidly
+                            delay(delay.milliseconds)
                         }
-                    ) {
-                        delay(max((messageOffset - currentPosition).div(playbackSpeed ?: 1f).toLong(), 0))
+                        if (!isActive) {
+                            break
+                        }
+                        listener.onChatMessage(message)
+                    } else {
+                        if (!isActive) {
+                            break
+                        }
                     }
-                    if (!isActive) {
-                        break
-                    }
-                    onMessage(
-                        ChatMessage(
-                            id = message.id,
-                            userId = message.userId,
-                            userLogin = message.userLogin,
-                            userName = message.userName,
-                            message = message.message,
-                            color = message.color,
-                            emotes = message.emotes,
-                            badges = message.badges,
-                            isAction = message.isAction,
-                            isFirst = message.isFirst,
-                            bits = message.bits,
-                            systemMsg = message.systemMsg,
-                            msgId = message.msgId,
-                            reward = message.reward,
-                            fullMsg = message.fullMsg
+                    liveList.remove(message)
+                } else {
+                    val message = list.firstOrNull() ?: break
+                    val messageOffset = if (!useOffsetSeconds && createdAt != null && !message.createdAt.isNullOrBlank()) {
+                        Instant.parseOrNull(message.createdAt)?.toEpochMilliseconds()?.takeIf { ms -> ms > 0 }?.minus(createdAt)
+                    } else {
+                        null
+                    } ?: message.offsetSeconds?.times(1000L)
+                    if (messageOffset != null) {
+                        var currentPosition: Long
+                        while (
+                            (getCurrentPosition() ?: 0).let { position ->
+                                lastCheckedPosition = position
+                                currentPosition = position + startTime
+                                currentPosition < messageOffset
+                            }
+                        ) {
+                            val timeLeft = (messageOffset - currentPosition).div(playbackSpeed ?: 1f).toLong()
+                            val delay = max(timeLeft, 1) // ExoPlayer getCurrentPosition freezes the app if it's called too rapidly
+                            delay(delay.milliseconds)
+                        }
+                        if (!isActive) {
+                            break
+                        }
+                        listener.onChatMessage(
+                            ChatMessage(
+                                type = ChatMessage.USER_MESSAGE,
+                                id = message.id,
+                                userId = message.userId,
+                                userLogin = message.userLogin,
+                                userName = message.userName,
+                                message = message.message,
+                                color = message.color,
+                                emotes = message.emotes,
+                                badges = message.badges,
+                                bits = 0,
+                                fullMsg = message.fullMsg
+                            )
                         )
-                    )
-                } else if (!isActive) break
-                list.remove(message)
+                    } else {
+                        if (!isActive) {
+                            break
+                        }
+                    }
+                    list.remove(message)
+                }
             }
         }
     }
 
     fun updatePosition(position: Long) {
-        if (started && messages.isNotEmpty() && lastCheckedPosition != position) {
+        if (started && (!liveMessages.isNullOrEmpty() || !messages.isNullOrEmpty()) && lastCheckedPosition != position) {
             if (position - lastCheckedPosition !in 0..20000) {
                 loadJob?.cancel()
                 messageJob?.cancel()
+                liveList.clear()
                 list.clear()
-                clearMessages()
+                coroutineScope.launch {
+                    listener.clearMessages()
+                }
                 load(position + startTime)
             } else {
                 messageJob?.cancel()
@@ -136,7 +229,7 @@ class ChatReplayManagerLocal @Inject constructor(
     }
 
     fun updateSpeed(speed: Float) {
-        if (started && messages.isNotEmpty() && playbackSpeed != speed) {
+        if (started && (!liveMessages.isNullOrEmpty() || !messages.isNullOrEmpty()) && playbackSpeed != speed) {
             playbackSpeed = speed
             messageJob?.cancel()
             startJob()

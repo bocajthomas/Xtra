@@ -16,13 +16,12 @@ class Stream(
     val gameId: String? = null,
     @SerialName("game_name")
     val gameName: String? = null,
-    val type: String? = null,
     val title: String? = null,
     @SerialName("viewer_count")
     val viewerCount: Int? = null,
     @SerialName("started_at")
     val startedAt: String? = null,
     @SerialName("thumbnail_url")
-    val thumbnailUrl: String? = null,
+    val thumbnailURL: String? = null,
     val tags: List<String>? = null,
 )

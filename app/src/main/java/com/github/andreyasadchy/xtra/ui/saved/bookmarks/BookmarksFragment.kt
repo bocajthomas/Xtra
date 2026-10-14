@@ -1,6 +1,5 @@
 package com.github.andreyasadchy.xtra.ui.saved.bookmarks
 
-import android.os.Build
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
@@ -20,32 +19,30 @@ import com.github.andreyasadchy.xtra.R
 import com.github.andreyasadchy.xtra.databinding.CommonRecyclerViewLayoutBinding
 import com.github.andreyasadchy.xtra.databinding.SortBarBinding
 import com.github.andreyasadchy.xtra.model.ui.Bookmark
-import com.github.andreyasadchy.xtra.model.ui.SortChannel
+import com.github.andreyasadchy.xtra.model.ui.ChannelSort
 import com.github.andreyasadchy.xtra.ui.common.BaseNetworkFragment
 import com.github.andreyasadchy.xtra.ui.common.FragmentHost
 import com.github.andreyasadchy.xtra.ui.common.IntegrityDialog
 import com.github.andreyasadchy.xtra.ui.common.Scrollable
 import com.github.andreyasadchy.xtra.ui.common.Sortable
 import com.github.andreyasadchy.xtra.ui.download.DownloadDialog
+import com.github.andreyasadchy.xtra.ui.main.MainActivity
+import com.github.andreyasadchy.xtra.ui.saved.bookmarks.BookmarksViewModel.Companion.BookmarksViewModelFactory
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
 import com.github.andreyasadchy.xtra.util.getAlertDialogBuilder
 import com.github.andreyasadchy.xtra.util.prefs
-import com.github.andreyasadchy.xtra.util.visible
-import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import java.time.Duration
-import java.time.Instant
-import java.time.temporal.ChronoUnit
-import java.util.Calendar
+import kotlin.time.Clock
+import kotlin.time.Duration.Companion.days
+import kotlin.time.Instant
 
-@AndroidEntryPoint
-class BookmarksFragment : BaseNetworkFragment(), Scrollable, Sortable, BookmarksSortDialog.OnFilter, IntegrityDialog.CallbackListener {
+class BookmarksFragment : BaseNetworkFragment(), Scrollable, Sortable, BookmarksSortDialog.OnFilter, IntegrityDialog.Listener {
 
     private var _binding: CommonRecyclerViewLayoutBinding? = null
     private val binding get() = _binding!!
-    private val viewModel: BookmarksViewModel by viewModels()
+    private val viewModel: BookmarksViewModel by viewModels { BookmarksViewModelFactory }
     private lateinit var adapter: ListAdapter<Bookmark, out RecyclerView.ViewHolder>
     override var enableNetworkCheck = false
 
@@ -58,15 +55,8 @@ class BookmarksFragment : BaseNetworkFragment(), Scrollable, Sortable, Bookmarks
         super.onViewCreated(view, savedInstanceState)
         viewLifecycleOwner.lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                viewModel.integrity.collectLatest {
-                    if (it != null &&
-                        it != "done" &&
-                        requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false) &&
-                        requireContext().prefs().getBoolean(C.USE_WEBVIEW_INTEGRITY, true)
-                    ) {
-                        IntegrityDialog.show(childFragmentManager, it)
-                        viewModel.integrity.value = "done"
-                    }
+                viewModel.integrity.collect {
+                    (requireActivity() as? MainActivity)?.getNewIntegrityToken(it, childFragmentManager)
                 }
             }
         }
@@ -74,27 +64,27 @@ class BookmarksFragment : BaseNetworkFragment(), Scrollable, Sortable, Bookmarks
             viewModel.updateVideo(
                 requireContext().filesDir.path,
                 it,
-                requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+                requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
                 TwitchApiHelper.getGQLHeaders(requireContext()),
                 TwitchApiHelper.getHelixHeaders(requireContext()),
                 requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
             )
         }, {
-            DownloadDialog.newInstance(
+            DownloadDialog.newVideoInstance(
                 id = it.id,
-                title = it.title,
-                uploadDate = it.uploadDate,
-                duration = it.duration,
-                videoType = it.type,
-                animatedPreviewUrl = it.animatedPreviewURL,
                 channelId = it.channelId,
                 channelLogin = it.channelLogin,
                 channelName = it.channelName,
-                channelLogo = it.channelLogo,
-                thumbnail = it.thumbnail,
+                channelImage = it.channelImage,
                 gameId = it.gameId,
                 gameSlug = it.gameSlug,
                 gameName = it.gameName,
+                title = it.title,
+                thumbnail = it.thumbnail,
+                createdAt = it.createdAt,
+                durationSeconds = it.durationSeconds,
+                type = it.type,
+                animatedPreviewUrl = it.animatedPreviewURL,
             ).show(childFragmentManager, null)
         }, {
             viewModel.vodIgnoreUser(it)
@@ -134,14 +124,14 @@ class BookmarksFragment : BaseNetworkFragment(), Scrollable, Sortable, Bookmarks
     override fun initialize() {
         viewLifecycleOwner.lifecycleScope.launch {
             if (viewModel.filter.value == null) {
-                val sortValues = viewModel.getSortChannel("bookmarks")
+                val sortValues = viewModel.getChannelSort("bookmarks")
                 viewModel.setFilter(
                     sort = sortValues?.videoSort,
                     order = sortValues?.videoType,
                 )
-                viewModel.sortText.value = requireContext().getString(
+                viewModel.sortText.value = getString(
                     R.string.sort_and_order,
-                    requireContext().getString(
+                    getString(
                         when (viewModel.sort) {
                             BookmarksSortDialog.SORT_EXPIRES_AT -> R.string.deletion_date
                             BookmarksSortDialog.SORT_CREATED_AT -> R.string.creation_date
@@ -149,7 +139,7 @@ class BookmarksFragment : BaseNetworkFragment(), Scrollable, Sortable, Bookmarks
                             else -> R.string.saved_date
                         }
                     ),
-                    requireContext().getString(
+                    getString(
                         when (viewModel.order) {
                             BookmarksSortDialog.ORDER_DESC -> R.string.descending
                             BookmarksSortDialog.ORDER_ASC -> R.string.ascending
@@ -164,37 +154,27 @@ class BookmarksFragment : BaseNetworkFragment(), Scrollable, Sortable, Bookmarks
                         when (viewModel.sort) {
                             BookmarksSortDialog.SORT_EXPIRES_AT -> list.sortedWith(compareBy(nullsLast()) {
                                 if (it.type?.lowercase() == "archive") {
-                                    val userType = it.userType ?: it.userBroadcasterType
-                                    if (userType != null && it.createdAt != null) {
-                                        val time = TwitchApiHelper.parseIso8601DateUTC(it.createdAt)
-                                        val days = when (userType.lowercase()) {
-                                            "" -> 14
-                                            "affiliate" -> 14
-                                            else -> 60
-                                        }
-                                        if (time != null) {
-                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                                val date = Instant.ofEpochMilli(time).plus(days.toLong(), ChronoUnit.DAYS)
-                                                val diff = Duration.between(Instant.now(), date)
-                                                if (!diff.isNegative) {
-                                                    diff.seconds
-                                                } else null
+                                    it.createdAt?.let { createdAt ->
+                                        Instant.parseOrNull(createdAt)?.takeIf { time -> time.toEpochMilliseconds() > 0 }?.let { time ->
+                                            val userType = it.userType ?: it.userBroadcasterType
+                                            val days = if (userType.isNullOrBlank()) {
+                                                7
                                             } else {
-                                                val currentTime = Calendar.getInstance().time.time
-                                                val calendar = Calendar.getInstance()
-                                                calendar.timeInMillis = time
-                                                calendar.add(Calendar.DAY_OF_MONTH, days)
-                                                val diff = ((calendar.time.time - currentTime) / 1000)
-                                                if (diff >= 0) {
-                                                    diff
-                                                } else null
+                                                when (userType.lowercase()) {
+                                                    "affiliate" -> 14
+                                                    else -> 60 // Partners, Prime, Turbo
+                                                }
                                             }
-                                        } else null
-                                    } else null
+                                            val timeLeft = (time + days.days) - Clock.System.now()
+                                            if (timeLeft.isPositive()) {
+                                                timeLeft.inWholeSeconds
+                                            } else null
+                                        }
+                                    }
                                 } else null
                             })
                             BookmarksSortDialog.SORT_CREATED_AT -> list.sortedWith(compareBy(nullsLast()) {
-                                it.createdAt?.let { createdAt -> TwitchApiHelper.parseIso8601DateUTC(createdAt) }
+                                it.createdAt?.let { createdAt -> Instant.parseOrNull(createdAt)?.toEpochMilliseconds()?.takeIf { ms -> ms > 0 } }
                             })
                             else -> list.sortedWith(compareBy(nullsLast()) { it.id })
                         }
@@ -202,37 +182,27 @@ class BookmarksFragment : BaseNetworkFragment(), Scrollable, Sortable, Bookmarks
                         when (viewModel.sort) {
                             BookmarksSortDialog.SORT_EXPIRES_AT -> list.sortedWith(compareByDescending(nullsFirst()) {
                                 if (it.type?.lowercase() == "archive") {
-                                    val userType = it.userType ?: it.userBroadcasterType
-                                    if (userType != null && it.createdAt != null) {
-                                        val time = TwitchApiHelper.parseIso8601DateUTC(it.createdAt)
-                                        val days = when (userType.lowercase()) {
-                                            "" -> 14
-                                            "affiliate" -> 14
-                                            else -> 60
-                                        }
-                                        if (time != null) {
-                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                                val date = Instant.ofEpochMilli(time).plus(days.toLong(), ChronoUnit.DAYS)
-                                                val diff = Duration.between(Instant.now(), date)
-                                                if (!diff.isNegative) {
-                                                    diff.seconds
-                                                } else null
+                                    it.createdAt?.let { createdAt ->
+                                        Instant.parseOrNull(createdAt)?.takeIf { time -> time.toEpochMilliseconds() > 0 }?.let { time ->
+                                            val userType = it.userType ?: it.userBroadcasterType
+                                            val days = if (userType.isNullOrBlank()) {
+                                                7
                                             } else {
-                                                val currentTime = Calendar.getInstance().time.time
-                                                val calendar = Calendar.getInstance()
-                                                calendar.timeInMillis = time
-                                                calendar.add(Calendar.DAY_OF_MONTH, days)
-                                                val diff = ((calendar.time.time - currentTime) / 1000)
-                                                if (diff >= 0) {
-                                                    diff
-                                                } else null
+                                                when (userType.lowercase()) {
+                                                    "affiliate" -> 14
+                                                    else -> 60 // Partners, Prime, Turbo
+                                                }
                                             }
-                                        } else null
-                                    } else null
+                                            val timeLeft = (time + days.days) - Clock.System.now()
+                                            if (timeLeft.isPositive()) {
+                                                timeLeft.inWholeSeconds
+                                            } else null
+                                        }
+                                    }
                                 } else null
                             })
                             BookmarksSortDialog.SORT_CREATED_AT -> list.sortedWith(compareByDescending(nullsFirst()) {
-                                it.createdAt?.let { createdAt -> TwitchApiHelper.parseIso8601DateUTC(createdAt) }
+                                it.createdAt?.let { createdAt -> Instant.parseOrNull(createdAt)?.toEpochMilliseconds()?.takeIf { ms -> ms > 0 } }
                             })
                             else -> list.sortedWith(compareByDescending(nullsFirst()) { it.id })
                         }
@@ -242,13 +212,7 @@ class BookmarksFragment : BaseNetworkFragment(), Scrollable, Sortable, Bookmarks
                 }
             }
         }
-        if (requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false) &&
-            requireContext().prefs().getBoolean(C.USE_WEBVIEW_INTEGRITY, true) &&
-            TwitchApiHelper.isIntegrityTokenExpired(requireContext())
-        ) {
-            IntegrityDialog.show(childFragmentManager, "refresh")
-        }
-        if (requireContext().prefs().getBoolean(C.PLAYER_USE_VIDEOPOSITIONS, true)) {
+        if (requireContext().prefs().getBoolean(C.PLAYER_USE_VIDEO_POSITIONS, true)) {
             viewLifecycleOwner.lifecycleScope.launch {
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
                     viewModel.positions.collectLatest {
@@ -266,7 +230,7 @@ class BookmarksFragment : BaseNetworkFragment(), Scrollable, Sortable, Bookmarks
                 }
             }
             viewModel.updateUsers(
-                requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+                requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
                 TwitchApiHelper.getGQLHeaders(requireContext()),
                 TwitchApiHelper.getHelixHeaders(requireContext()),
                 requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
@@ -274,12 +238,12 @@ class BookmarksFragment : BaseNetworkFragment(), Scrollable, Sortable, Bookmarks
         }
         val helixHeaders = TwitchApiHelper.getHelixHeaders(requireContext())
         if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-            viewModel.updateVideos(requireContext().filesDir.path, requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"), helixHeaders)
+            viewModel.updateVideos(requireContext().filesDir.path, requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP), helixHeaders)
         }
     }
 
     override fun setupSortBar(sortBar: SortBarBinding) {
-        sortBar.root.visible()
+        sortBar.root.visibility = View.VISIBLE
         sortBar.root.setOnClickListener {
             BookmarksSortDialog.newInstance(
                 sort = viewModel.sort,
@@ -301,18 +265,18 @@ class BookmarksFragment : BaseNetworkFragment(), Scrollable, Sortable, Bookmarks
                 if (changed) {
                     adapter.submitList(emptyList())
                     viewModel.setFilter(sort, order)
-                    viewModel.sortText.value = requireContext().getString(R.string.sort_and_order, sortText, orderText)
+                    viewModel.sortText.value = getString(R.string.sort_and_order, sortText, orderText)
                 }
                 if (saveDefault) {
-                    val item = viewModel.getSortChannel("bookmarks")?.apply {
+                    val item = viewModel.getChannelSort("bookmarks")?.apply {
                         videoSort = sort
                         videoType = order
-                    } ?: SortChannel(
+                    } ?: ChannelSort(
                         id = "bookmarks",
                         videoSort = sort,
                         videoType = order
                     )
-                    viewModel.saveSortChannel(item)
+                    viewModel.saveChannelSort(item)
                 }
             }
         }
@@ -325,19 +289,15 @@ class BookmarksFragment : BaseNetworkFragment(), Scrollable, Sortable, Bookmarks
     override fun onNetworkRestored() {
     }
 
-    override fun onIntegrityDialogCallback(callback: String?) {
-        if (callback != null) {
-            viewLifecycleOwner.lifecycleScope.launch {
-                repeatOnLifecycle(Lifecycle.State.STARTED) {
-                    when (callback) {
-                        "users" -> viewModel.updateUsers(
-                            requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
-                            TwitchApiHelper.getGQLHeaders(requireContext()),
-                            TwitchApiHelper.getHelixHeaders(requireContext()),
-                            requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
-                        )
-                    }
-                }
+    override fun onIntegrityTokenLoaded(callback: String?) {
+        when (callback) {
+            "users" -> {
+                viewModel.updateUsers(
+                    requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                    TwitchApiHelper.getGQLHeaders(requireContext()),
+                    TwitchApiHelper.getHelixHeaders(requireContext()),
+                    requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
+                )
             }
         }
     }

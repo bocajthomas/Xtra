@@ -14,7 +14,6 @@ class SearchChannelsDataSource(
     private val helixHeaders: Map<String, String>,
     private val helixRepository: HelixRepository,
     private val enableIntegrity: Boolean,
-    private val apiPref: List<String>,
     private val networkLibrary: String?,
 ) : PagingSource<Int, User>() {
     private var api: String? = null
@@ -30,19 +29,22 @@ class SearchChannelsDataSource(
         } else {
             if (!offset.isNullOrBlank()) {
                 try {
-                    loadFromApi(api, params)
+                    loadFromApi(params)
                 } catch (e: Exception) {
                     LoadResult.Error(e)
                 }
             } else {
                 try {
-                    loadFromApi(apiPref.getOrNull(0), params)
+                    api = C.GQL
+                    loadFromApi(params)
                 } catch (e: Exception) {
                     try {
-                        loadFromApi(apiPref.getOrNull(1), params)
+                        api = C.GQL_PERSISTED_QUERY
+                        loadFromApi(params)
                     } catch (e: Exception) {
                         try {
-                            loadFromApi(apiPref.getOrNull(2), params)
+                            api = C.HELIX
+                            loadFromApi(params)
                         } catch (e: Exception) {
                             LoadResult.Error(e)
                         }
@@ -52,9 +54,8 @@ class SearchChannelsDataSource(
         }
     }
 
-    private suspend fun loadFromApi(apiPref: String?, params: LoadParams<Int>): LoadResult<Int, User> {
-        api = apiPref
-        return when (apiPref) {
+    private suspend fun loadFromApi(params: LoadParams<Int>): LoadResult<Int, User> {
+        return when (api) {
             C.GQL -> gqlQueryLoad(params)
             C.GQL_PERSISTED_QUERY -> gqlLoad(params)
             C.HELIX -> if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) helixLoad(params) else throw Exception()
@@ -65,18 +66,18 @@ class SearchChannelsDataSource(
     private suspend fun gqlQueryLoad(params: LoadParams<Int>): LoadResult<Int, User> {
         val response = graphQLRepository.loadQuerySearchChannels(networkLibrary, gqlHeaders, query, params.loadSize, offset)
         if (enableIntegrity) {
-            response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
+            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
         }
         val data = response.data!!.searchUsers!!
         val list = data.edges!!.mapNotNull { item ->
             item.node?.let {
                 User(
-                    channelId = it.id,
-                    channelLogin = it.login,
-                    channelName = it.displayName,
-                    profileImageUrl = it.profileImageURL,
-                    followersCount = it.followers?.totalCount,
-                    type = it.stream?.type
+                    id = it.id,
+                    login = it.login,
+                    name = it.displayName,
+                    profileImageURL = it.profileImageURL,
+                    followerCount = it.followers?.totalCount,
+                    isLive = it.stream?.viewersCount != null,
                 )
             }
         }
@@ -94,18 +95,18 @@ class SearchChannelsDataSource(
     private suspend fun gqlLoad(params: LoadParams<Int>): LoadResult<Int, User> {
         val response = graphQLRepository.loadSearchChannels(networkLibrary, gqlHeaders, query, offset)
         if (enableIntegrity) {
-            response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
+            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
         }
         val data = response.data!!.searchFor.channels
         val list = data.edges.map { item ->
             item.item.let {
                 User(
-                    channelId = it.id,
-                    channelLogin = it.login,
-                    channelName = it.displayName,
-                    profileImageUrl = it.profileImageURL,
-                    followersCount = it.followers?.totalCount,
-                    type = it.stream?.type
+                    id = it.id,
+                    login = it.login,
+                    name = it.displayName,
+                    profileImageURL = it.profileImageURL,
+                    followerCount = it.followers?.totalCount,
+                    isLive = it.stream?.viewersCount != null,
                 )
             }
         }
@@ -129,11 +130,11 @@ class SearchChannelsDataSource(
         )
         val list = response.data.map {
             User(
-                channelId = it.channelId,
-                channelLogin = it.channelLogin,
-                channelName = it.channelName,
-                profileImageUrl = it.profileImageUrl,
-                isLive = it.isLive
+                id = it.id,
+                login = it.login,
+                name = it.displayName,
+                profileImageURL = it.profileImageURL,
+                isLive = it.isLive,
             )
         }
         offset = response.pagination?.cursor

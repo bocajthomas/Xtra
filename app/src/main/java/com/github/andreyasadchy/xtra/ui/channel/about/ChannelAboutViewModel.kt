@@ -1,20 +1,23 @@
 package com.github.andreyasadchy.xtra.ui.channel.about
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
+import com.github.andreyasadchy.xtra.XtraApp
 import com.github.andreyasadchy.xtra.model.ui.ChannelPanel
 import com.github.andreyasadchy.xtra.repository.GraphQLRepository
-import dagger.hilt.android.lifecycle.HiltViewModel
+import com.github.andreyasadchy.xtra.util.C
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
-import javax.inject.Inject
 
-@HiltViewModel
-class ChannelAboutViewModel @Inject constructor(
+class ChannelAboutViewModel(
     private val graphQLRepository: GraphQLRepository,
 ) : ViewModel() {
 
-    val integrity = MutableStateFlow<String?>(null)
+    val integrity = MutableSharedFlow<String?>()
 
     val description = MutableStateFlow<String?>(null)
     val socialMedias = MutableStateFlow<List<Pair<String?, String?>>?>(null)
@@ -30,9 +33,9 @@ class ChannelAboutViewModel @Inject constructor(
             viewModelScope.launch {
                 try {
                     val response = graphQLRepository.loadQueryUserAbout(networkLibrary, gqlHeaders, channelId, channelLogin.takeIf { channelId.isNullOrBlank() })
-                    if (enableIntegrity && integrity.value == null) {
-                        response.errors?.find { it.message == "failed integrity check" }?.let {
-                            integrity.value = "refresh"
+                    if (enableIntegrity) {
+                        response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                            integrity.emit("refresh")
                             isLoading = false
                             return@launch
                         }
@@ -59,6 +62,16 @@ class ChannelAboutViewModel @Inject constructor(
 
                 }
                 isLoading = false
+            }
+        }
+    }
+
+    companion object {
+        val ChannelAboutViewModelFactory = viewModelFactory {
+            initializer {
+                val application = (this[APPLICATION_KEY] as XtraApp)
+                val xtraModule = application.xtraModule
+                ChannelAboutViewModel(xtraModule.graphQLRepository)
             }
         }
     }

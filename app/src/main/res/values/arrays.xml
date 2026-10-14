@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string-array name="playerEntries">
+        <item>ExoPlayer</item>
+        <item>MediaPlayer</item>
+    </string-array>
+
     <string-array name="networkLibraryEntries">
         <item>HttpEngine</item>
         <item>Cronet</item>
@@ -26,20 +31,6 @@
         <item>0</item>
         <item>1</item>
         <item>2</item>
-    </string-array>
-
-    <string-array name="skipVideoTokenEntries">
-        <item>@string/skipVideoTokenEntries1</item>
-        <item>@string/skipVideoTokenEntries2</item>
-        <item>@string/skipVideoTokenEntries3</item>
-        <item>@string/skipVideoTokenEntries4</item>
-    </string-array>
-
-    <string-array name="skipVideoTokenValues">
-        <item>0</item>
-        <item>1</item>
-        <item>2</item>
-        <item>3</item>
     </string-array>
 
     <string-array name="followButtonEntries">
@@ -123,6 +114,18 @@
         <item>3</item>
     </string-array>
 
+    <string-array name="roundedCornerEntries">
+        <item>@string/enabled_setting</item>
+        <item>@string/less_rounded_corners</item>
+        <item>@string/disabled_setting</item>
+    </string-array>
+
+    <string-array name="roundedCornerValues">
+        <item>0</item>
+        <item>1</item>
+        <item>2</item>
+    </string-array>
+
     <string-array name="portraitColumnCount">
         <item>1</item>
         <item>2</item>
@@ -137,22 +140,6 @@
         <item>4</item>
         <item>5</item>
         <item>6</item>
-    </string-array>
-
-    <string-array name="playerSeekEntries">
-        <item>5</item>
-        <item>10</item>
-        <item>15</item>
-        <item>30</item>
-        <item>60</item>
-    </string-array>
-
-    <string-array name="playerSeekValues">
-        <item>5000</item>
-        <item>10000</item>
-        <item>15000</item>
-        <item>30000</item>
-        <item>60000</item>
     </string-array>
 
     <string-array name="playerQualityEntries">
@@ -191,6 +178,7 @@
         <item>@string/lang_en</item>
         <item>@string/lang_es</item>
         <item>@string/lang_fr</item>
+        <item>@string/lang_gl</item>
         <item>@string/lang_in</item>
         <item>@string/lang_it</item>
         <item>@string/lang_pt_br</item>
@@ -208,6 +196,7 @@
         <item>en</item>
         <item>es</item>
         <item>fr</item>
+        <item>gl</item>
         <item>in</item>
         <item>it</item>
         <item>pt-BR</item>

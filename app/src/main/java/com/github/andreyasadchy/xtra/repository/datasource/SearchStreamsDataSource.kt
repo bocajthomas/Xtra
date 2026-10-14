@@ -14,7 +14,6 @@ class SearchStreamsDataSource(
     private val helixHeaders: Map<String, String>,
     private val helixRepository: HelixRepository,
     private val enableIntegrity: Boolean,
-    private val apiPref: List<String>,
     private val networkLibrary: String?,
 ) : PagingSource<Int, Stream>() {
     private var api: String? = null
@@ -30,16 +29,18 @@ class SearchStreamsDataSource(
         } else {
             if (!offset.isNullOrBlank()) {
                 try {
-                    loadFromApi(api, params)
+                    loadFromApi(params)
                 } catch (e: Exception) {
                     LoadResult.Error(e)
                 }
             } else {
                 try {
-                    loadFromApi(apiPref.getOrNull(0), params)
+                    api = C.GQL
+                    loadFromApi(params)
                 } catch (e: Exception) {
                     try {
-                        loadFromApi(apiPref.getOrNull(1), params)
+                        api = C.HELIX
+                        loadFromApi(params)
                     } catch (e: Exception) {
                         LoadResult.Error(e)
                     }
@@ -48,9 +49,8 @@ class SearchStreamsDataSource(
         }
     }
 
-    private suspend fun loadFromApi(apiPref: String?, params: LoadParams<Int>): LoadResult<Int, Stream> {
-        api = apiPref
-        return when (apiPref) {
+    private suspend fun loadFromApi(params: LoadParams<Int>): LoadResult<Int, Stream> {
+        return when (api) {
             C.GQL -> gqlQueryLoad(params)
             C.HELIX -> if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) helixLoad(params) else throw Exception()
             else -> throw Exception()
@@ -60,7 +60,7 @@ class SearchStreamsDataSource(
     private suspend fun gqlQueryLoad(params: LoadParams<Int>): LoadResult<Int, Stream> {
         val response = graphQLRepository.loadQuerySearchStreams(networkLibrary, gqlHeaders, query, params.loadSize, offset)
         if (enableIntegrity) {
-            response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
+            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
         }
         val data = response.data!!.searchStreams!!
         val list = data.edges!!.mapNotNull { item ->
@@ -70,17 +70,18 @@ class SearchStreamsDataSource(
                     channelId = it.broadcaster?.id,
                     channelLogin = it.broadcaster?.login,
                     channelName = it.broadcaster?.displayName,
+                    channelImageURL = it.broadcaster?.profileImageURL,
                     gameId = it.game?.id,
                     gameSlug = it.game?.slug,
                     gameName = it.game?.displayName,
-                    type = it.type,
                     title = it.broadcaster?.broadcastSettings?.title,
+                    thumbnailURL = it.previewImageURL,
+                    createdAt = it.createdAt?.toString(),
                     viewerCount = it.viewersCount,
-                    startedAt = it.createdAt?.toString(),
-                    thumbnailUrl = it.previewImageURL,
-                    profileImageUrl = it.broadcaster?.profileImageURL,
-                    tags = it.freeformTags?.mapNotNull { tag -> tag.name }
-                )
+                    tags = it.freeformTags?.mapNotNull { tag -> tag.name },
+                ).takeIf { stream ->
+                    stream.channelId != null || stream.channelLogin != null
+                }
             }
         }
         offset = data.edges.lastOrNull()?.cursor?.toString()
@@ -106,16 +107,18 @@ class SearchStreamsDataSource(
         val list = response.data.mapNotNull {
             if (it.isLive == true) {
                 Stream(
-                    channelId = it.channelId,
-                    channelLogin = it.channelLogin,
-                    channelName = it.channelName,
+                    channelId = it.id,
+                    channelLogin = it.login,
+                    channelName = it.displayName,
+                    channelImageURL = it.profileImageURL,
                     gameId = it.gameId,
                     gameName = it.gameName,
                     title = it.title,
-                    startedAt = it.startedAt,
-                    profileImageUrl = it.profileImageUrl,
-                    tags = it.tags
-                )
+                    createdAt = it.startedAt,
+                    tags = it.tags,
+                ).takeIf { stream ->
+                    stream.channelId != null || stream.channelLogin != null
+                }
             } else null
         }
         offset = response.pagination?.cursor

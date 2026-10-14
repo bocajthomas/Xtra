@@ -2,12 +2,13 @@ package com.github.andreyasadchy.xtra.repository.datasource
 
 import androidx.paging.PagingSource
 import androidx.paging.PagingState
+import com.github.andreyasadchy.xtra.graphql.type.BroadcastType
+import com.github.andreyasadchy.xtra.graphql.type.VideoSort
 import com.github.andreyasadchy.xtra.model.ui.Video
 import com.github.andreyasadchy.xtra.repository.GraphQLRepository
 import com.github.andreyasadchy.xtra.repository.HelixRepository
-import com.github.andreyasadchy.xtra.type.BroadcastType
-import com.github.andreyasadchy.xtra.type.VideoSort
 import com.github.andreyasadchy.xtra.util.C
+import com.github.andreyasadchy.xtra.util.TwitchApiHelper
 
 class ChannelVideosDataSource(
     private val channelId: String?,
@@ -24,7 +25,6 @@ class ChannelVideosDataSource(
     private val helixHeaders: Map<String, String>,
     private val helixRepository: HelixRepository,
     private val enableIntegrity: Boolean,
-    private val apiPref: List<String>,
     private val networkLibrary: String?,
 ) : PagingSource<Int, Video>() {
     private var api: String? = null
@@ -33,19 +33,22 @@ class ChannelVideosDataSource(
     override suspend fun load(params: LoadParams<Int>): LoadResult<Int, Video> {
         return if (!offset.isNullOrBlank()) {
             try {
-                loadFromApi(api, params)
+                loadFromApi(params)
             } catch (e: Exception) {
                 LoadResult.Error(e)
             }
         } else {
             try {
-                loadFromApi(apiPref.getOrNull(0), params)
+                api = C.GQL
+                loadFromApi(params)
             } catch (e: Exception) {
                 try {
-                    loadFromApi(apiPref.getOrNull(1), params)
+                    api = C.GQL_PERSISTED_QUERY
+                    loadFromApi(params)
                 } catch (e: Exception) {
                     try {
-                        loadFromApi(apiPref.getOrNull(2), params)
+                        api = C.HELIX
+                        loadFromApi(params)
                     } catch (e: Exception) {
                         LoadResult.Error(e)
                     }
@@ -54,9 +57,8 @@ class ChannelVideosDataSource(
         }
     }
 
-    private suspend fun loadFromApi(apiPref: String?, params: LoadParams<Int>): LoadResult<Int, Video> {
-        api = apiPref
-        return when (apiPref) {
+    private suspend fun loadFromApi(params: LoadParams<Int>): LoadResult<Int, Video> {
+        return when (api) {
             C.GQL -> if (helixPeriod == "all") gqlQueryLoad(params) else throw Exception()
             C.GQL_PERSISTED_QUERY -> if (helixPeriod == "all") gqlLoad(params) else throw Exception()
             C.HELIX -> if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) helixLoad(params) else throw Exception()
@@ -67,7 +69,7 @@ class ChannelVideosDataSource(
     private suspend fun gqlQueryLoad(params: LoadParams<Int>): LoadResult<Int, Video> {
         val response = graphQLRepository.loadQueryUserVideos(networkLibrary, gqlHeaders, channelId, channelLogin.takeIf { channelId.isNullOrBlank() }, gqlQuerySort, gqlQueryType?.let { listOf(it) }, params.loadSize, offset)
         if (enableIntegrity) {
-            response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
+            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
         }
         val data = response.data!!.user!!
         val items = data.videos!!.edges!!
@@ -78,17 +80,17 @@ class ChannelVideosDataSource(
                     channelId = channelId,
                     channelLogin = data.login,
                     channelName = data.displayName,
+                    channelImageURL = data.profileImageURL,
                     gameId = it.game?.id,
                     gameSlug = it.game?.slug,
                     gameName = it.game?.displayName,
-                    type = it.broadcastType?.toString(),
                     title = it.title,
+                    thumbnailURL = it.previewThumbnailURL,
+                    createdAt = it.createdAt?.toString(),
                     viewCount = it.viewCount,
-                    uploadDate = it.createdAt?.toString(),
-                    duration = it.lengthSeconds?.toString(),
-                    thumbnailUrl = it.previewThumbnailURL,
-                    profileImageUrl = data.profileImageURL,
-                    animatedPreviewURL = it.animatedPreviewURL
+                    durationSeconds = it.lengthSeconds,
+                    type = it.broadcastType?.toString(),
+                    animatedPreviewURL = it.animatedPreviewURL,
                 )
             }
         }
@@ -106,7 +108,7 @@ class ChannelVideosDataSource(
     private suspend fun gqlLoad(params: LoadParams<Int>): LoadResult<Int, Video> {
         val response = graphQLRepository.loadChannelVideos(networkLibrary, gqlHeaders, channelLogin, gqlType, gqlSort, params.loadSize, offset)
         if (enableIntegrity) {
-            response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
+            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
         }
         val data = response.data!!.user
         val items = data.videos!!.edges
@@ -117,16 +119,16 @@ class ChannelVideosDataSource(
                     channelId = it.owner?.id,
                     channelLogin = it.owner?.login,
                     channelName = it.owner?.displayName,
+                    channelImageURL = it.owner?.profileImageURL,
                     gameId = it.game?.id,
                     gameSlug = it.game?.slug,
                     gameName = it.game?.displayName,
                     title = it.title,
+                    thumbnailURL = it.previewThumbnailURL,
+                    createdAt = it.publishedAt,
                     viewCount = it.viewCount,
-                    uploadDate = it.publishedAt,
-                    duration = it.lengthSeconds?.toString(),
-                    thumbnailUrl = it.previewThumbnailURL,
-                    profileImageUrl = it.owner?.profileImageURL,
-                    animatedPreviewURL = it.animatedPreviewURL
+                    durationSeconds = it.lengthSeconds,
+                    animatedPreviewURL = it.animatedPreviewURL,
                 )
             }
         }
@@ -159,10 +161,10 @@ class ChannelVideosDataSource(
                 channelLogin = it.channelLogin,
                 channelName = it.channelName,
                 title = it.title,
+                thumbnailURL = it.thumbnailURL,
+                createdAt = it.createdAt,
                 viewCount = it.viewCount,
-                uploadDate = it.uploadDate,
-                duration = it.duration,
-                thumbnailUrl = it.thumbnailUrl,
+                durationSeconds = it.duration?.let { duration -> TwitchApiHelper.getDuration(duration) },
             )
         }
         offset = response.pagination?.cursor

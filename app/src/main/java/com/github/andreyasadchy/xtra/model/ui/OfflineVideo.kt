@@ -45,6 +45,7 @@ class OfflineVideo(
     var status: Int = STATUS_PENDING,
     val type: String? = null,
     var videoId: String? = null,
+    val videoCreatedAt: String? = null,
     val clipId: String? = null,
     val quality: String? = null,
     val downloadChat: Boolean = false,
@@ -57,6 +58,7 @@ class OfflineVideo(
     val playlistToFile: Boolean = false,
     val live: Boolean = false,
     var lastSegmentUrl: String? = null,
+    var liveCommentsArrayStarted: Boolean = false,
 ) : Parcelable {
 
     @IgnoredOnParcel
@@ -70,9 +72,9 @@ class OfflineVideo(
         const val STATUS_MOVING = 3
         const val STATUS_DELETING = 4
         const val STATUS_CONVERTING = 5
-        const val STATUS_BLOCKED = 6
-        const val STATUS_QUEUED = 7
-        const val STATUS_QUEUED_WIFI = 8
+        const val STATUS_QUEUED = 6
+        const val STATUS_WAITING_FOR_NETWORK = 7
+        const val STATUS_WAITING_FOR_WIFI = 8
         const val STATUS_WAITING_FOR_STREAM = 9
     }
 }

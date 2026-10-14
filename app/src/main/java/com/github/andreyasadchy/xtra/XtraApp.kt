@@ -1,12 +1,8 @@
 package com.github.andreyasadchy.xtra
 
+import android.annotation.SuppressLint
 import android.app.Application
-import android.net.http.HttpEngine
-import android.net.http.UrlResponseInfo
 import android.os.Build
-import android.os.ext.SdkExtensions
-import androidx.hilt.work.HiltWorkerFactory
-import androidx.work.Configuration
 import coil3.ImageLoader
 import coil3.PlatformContext
 import coil3.SingletonImageLoader
@@ -20,58 +16,34 @@ import coil3.network.NetworkResponseBody
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.util.DebugLogger
 import com.github.andreyasadchy.xtra.util.C
-import com.github.andreyasadchy.xtra.util.HttpEngineUtils
+import com.github.andreyasadchy.xtra.util.NetworkUtils
 import com.github.andreyasadchy.xtra.util.coil.CacheControlCacheStrategy
-import com.github.andreyasadchy.xtra.util.getByteArrayCronetCallback
 import com.github.andreyasadchy.xtra.util.prefs
-import dagger.Lazy
-import dagger.hilt.android.HiltAndroidApp
-import okhttp3.OkHttpClient
+import kotlinx.coroutines.suspendCancellableCoroutine
 import okio.Buffer
 import okio.buffer
 import okio.source
-import org.chromium.net.CronetEngine
-import org.chromium.net.apihelpers.RedirectHandlers
 import org.chromium.net.apihelpers.UploadDataProviders
-import org.chromium.net.apihelpers.UrlRequestCallbacks
-import java.util.concurrent.ExecutorService
-import javax.inject.Inject
-import kotlin.coroutines.suspendCoroutine
+import org.conscrypt.Conscrypt
+import java.security.Security
 
-
-@HiltAndroidApp
-class XtraApp : Application(), Configuration.Provider, SingletonImageLoader.Factory {
+class XtraApp : Application(), SingletonImageLoader.Factory {
 
     companion object {
         lateinit var INSTANCE: Application
     }
 
+    lateinit var xtraModule: XtraModule
+
     override fun onCreate() {
         super.onCreate()
         INSTANCE = this
+        xtraModule = XtraModule(this)
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            val conscrypt = Conscrypt.newProvider()
+            Security.insertProviderAt(conscrypt, 1)
+        }
     }
-
-    @Inject
-    lateinit var workerFactory: HiltWorkerFactory
-
-    override val workManagerConfiguration: Configuration
-        get() = Configuration.Builder()
-            .setWorkerFactory(workerFactory)
-            .build()
-
-    @Inject
-    @JvmField
-    var httpEngine: Lazy<HttpEngine>? = null
-
-    @Inject
-    @JvmField
-    var cronetEngine: Lazy<CronetEngine>? = null
-
-    @Inject
-    lateinit var cronetExecutor: ExecutorService
-
-    @Inject
-    lateinit var okHttpClient: OkHttpClient
 
     @OptIn(ExperimentalCoilApi::class)
     override fun newImageLoader(context: PlatformContext): ImageLoader {
@@ -80,9 +52,9 @@ class XtraApp : Application(), Configuration.Provider, SingletonImageLoader.Fact
                 logger(DebugLogger())
             }
             components {
-                val networkLibrary = prefs().getString(C.NETWORK_LIBRARY, "OkHttp")
+                val networkLibrary = prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP)
                 when {
-                    networkLibrary == "HttpEngine" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S) >= 7 && httpEngine != null -> {
+                    networkLibrary == C.HTTP_ENGINE && xtraModule.httpEngine.value != null -> @SuppressLint("NewApi") {
                         add(NetworkFetcher.Factory(
                             networkClient = {
                                 object : NetworkClient {
@@ -93,31 +65,42 @@ class XtraApp : Application(), Configuration.Provider, SingletonImageLoader.Fact
                                             buffer.readByteArray()
                                         }
                                         val requestMillis = System.currentTimeMillis()
-                                        val response = suspendCoroutine<Pair<UrlResponseInfo, ByteArray>> { continuation ->
-                                            httpEngine!!.get().newUrlRequestBuilder(request.url, cronetExecutor, HttpEngineUtils.byteArrayUrlCallback(continuation)).apply {
+                                        val response = suspendCancellableCoroutine { continuation ->
+                                            val timeout = NetworkUtils.HttpEngineTimeout()
+                                            val request = xtraModule.httpEngine.value!!.newUrlRequestBuilder(
+                                                request.url,
+                                                xtraModule.cronetExecutor.value,
+                                                NetworkUtils.ByteArrayUrlCallback(continuation, timeout)
+                                            ).apply {
                                                 request.headers.asMap().forEach { entry ->
                                                     entry.value.forEach {
                                                         addHeader(entry.key, it)
                                                     }
                                                 }
                                                 requestBody?.let {
-                                                    setUploadDataProvider(HttpEngineUtils.byteArrayUploadProvider(requestBody), cronetExecutor)
+                                                    setUploadDataProvider(NetworkUtils.ByteArrayUploadProvider(requestBody), xtraModule.cronetExecutor.value)
                                                 }
                                                 setHttpMethod(request.method)
-                                            }.build().start()
+                                            }.build()
+                                            timeout.start(request, continuation)
+                                            request.start()
+                                            continuation.invokeOnCancellation {
+                                                request.cancel()
+                                                timeout.stop()
+                                            }
                                         }
                                         val responseMillis = System.currentTimeMillis()
                                         return block(
                                             NetworkResponse(
-                                                code = response.first.httpStatusCode,
+                                                code = response.info.httpStatusCode,
                                                 requestMillis = requestMillis,
                                                 responseMillis = responseMillis,
                                                 headers = NetworkHeaders.Builder().apply {
-                                                    response.first.headers.asList.forEach {
+                                                    response.info.headers.asList.forEach {
                                                         add(it.key, it.value)
                                                     }
                                                 }.build(),
-                                                body = response.second.inputStream().source().buffer().let(::NetworkResponseBody),
+                                                body = response.body.inputStream().source().buffer().let(::NetworkResponseBody),
                                             )
                                         )
                                     }
@@ -126,95 +109,64 @@ class XtraApp : Application(), Configuration.Provider, SingletonImageLoader.Fact
                             cacheStrategy = { CacheControlCacheStrategy() }
                         ))
                     }
-                    networkLibrary == "Cronet" && cronetEngine != null -> {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                            add(NetworkFetcher.Factory(
-                                networkClient = {
-                                    object : NetworkClient {
-                                        override suspend fun <T> executeRequest(request: NetworkRequest, block: suspend (NetworkResponse) -> T): T {
-                                            val cronetRequest = UrlRequestCallbacks.forByteArrayBody(RedirectHandlers.alwaysFollow())
-                                            cronetEngine!!.get().newUrlRequestBuilder(request.url, cronetRequest.callback, cronetExecutor).apply {
+                    networkLibrary == C.CRONET && xtraModule.cronetEngine.value != null -> {
+                        add(NetworkFetcher.Factory(
+                            networkClient = {
+                                object : NetworkClient {
+                                    override suspend fun <T> executeRequest(request: NetworkRequest, block: suspend (NetworkResponse) -> T): T {
+                                        val requestBody = request.body?.let {
+                                            val buffer = Buffer()
+                                            it.writeTo(buffer)
+                                            buffer.readByteArray()
+                                        }
+                                        val requestMillis = System.currentTimeMillis()
+                                        val response = suspendCancellableCoroutine { continuation ->
+                                            val timeout = NetworkUtils.CronetTimeout()
+                                            val request = xtraModule.cronetEngine.value!!.newUrlRequestBuilder(
+                                                request.url,
+                                                NetworkUtils.ByteArrayCronetCallback(continuation, timeout),
+                                                xtraModule.cronetExecutor.value
+                                            ).apply {
                                                 request.headers.asMap().forEach { entry ->
                                                     entry.value.forEach {
                                                         addHeader(entry.key, it)
                                                     }
                                                 }
-                                                request.body?.let {
-                                                    val buffer = Buffer()
-                                                    it.writeTo(buffer)
-                                                    setUploadDataProvider(UploadDataProviders.create(buffer.readByteArray()), cronetExecutor)
+                                                requestBody?.let {
+                                                    setUploadDataProvider(UploadDataProviders.create(requestBody), xtraModule.cronetExecutor.value)
                                                 }
                                                 setHttpMethod(request.method)
-                                            }.build().start()
-                                            val requestMillis = System.currentTimeMillis()
-                                            val response = cronetRequest.future.get()
-                                            val responseMillis = System.currentTimeMillis()
-                                            return block(
-                                                NetworkResponse(
-                                                    code = response.urlResponseInfo.httpStatusCode,
-                                                    requestMillis = requestMillis,
-                                                    responseMillis = responseMillis,
-                                                    headers = NetworkHeaders.Builder().apply {
-                                                        response.urlResponseInfo.allHeadersAsList.forEach {
-                                                            add(it.key, it.value)
-                                                        }
-                                                    }.build(),
-                                                    body = (response.responseBody as ByteArray).inputStream().source().buffer().let(::NetworkResponseBody),
-                                                )
-                                            )
-                                        }
-                                    }
-                                },
-                                cacheStrategy = { CacheControlCacheStrategy() }
-                            ))
-                        } else {
-                            add(NetworkFetcher.Factory(
-                                networkClient = {
-                                    object : NetworkClient {
-                                        override suspend fun <T> executeRequest(request: NetworkRequest, block: suspend (NetworkResponse) -> T): T {
-                                            val requestBody = request.body?.let {
-                                                val buffer = Buffer()
-                                                it.writeTo(buffer)
-                                                buffer.readByteArray()
+                                            }.build()
+                                            timeout.start(request, continuation)
+                                            request.start()
+                                            continuation.invokeOnCancellation {
+                                                request.cancel()
+                                                timeout.stop()
                                             }
-                                            val requestMillis = System.currentTimeMillis()
-                                            val response = suspendCoroutine<Pair<org.chromium.net.UrlResponseInfo, ByteArray>> { continuation ->
-                                                cronetEngine!!.get().newUrlRequestBuilder(request.url, getByteArrayCronetCallback(continuation), cronetExecutor).apply {
-                                                    request.headers.asMap().forEach { entry ->
-                                                        entry.value.forEach {
-                                                            addHeader(entry.key, it)
-                                                        }
-                                                    }
-                                                    requestBody?.let {
-                                                        setUploadDataProvider(UploadDataProviders.create(requestBody), cronetExecutor)
-                                                    }
-                                                    setHttpMethod(request.method)
-                                                }.build().start()
-                                            }
-                                            val responseMillis = System.currentTimeMillis()
-                                            return block(
-                                                NetworkResponse(
-                                                    code = response.first.httpStatusCode,
-                                                    requestMillis = requestMillis,
-                                                    responseMillis = responseMillis,
-                                                    headers = NetworkHeaders.Builder().apply {
-                                                        response.first.allHeadersAsList.forEach {
-                                                            add(it.key, it.value)
-                                                        }
-                                                    }.build(),
-                                                    body = response.second.inputStream().source().buffer().let(::NetworkResponseBody),
-                                                )
-                                            )
                                         }
+                                        val responseMillis = System.currentTimeMillis()
+                                        return block(
+                                            NetworkResponse(
+                                                code = response.info.httpStatusCode,
+                                                requestMillis = requestMillis,
+                                                responseMillis = responseMillis,
+                                                headers = NetworkHeaders.Builder().apply {
+                                                    response.info.allHeadersAsList.forEach {
+                                                        add(it.key, it.value)
+                                                    }
+                                                }.build(),
+                                                body = response.body.inputStream().source().buffer().let(::NetworkResponseBody),
+                                            )
+                                        )
                                     }
-                                },
-                                cacheStrategy = { CacheControlCacheStrategy() }
-                            ))
-                        }
+                                }
+                            },
+                            cacheStrategy = { CacheControlCacheStrategy() }
+                        ))
                     }
                     else -> {
                         add(OkHttpNetworkFetcherFactory(
-                            callFactory = { okHttpClient },
+                            callFactory = { xtraModule.okHttpClient.value },
                             cacheStrategy = { CacheControlCacheStrategy() }
                         ))
                     }

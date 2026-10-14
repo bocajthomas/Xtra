@@ -1,14 +1,13 @@
 package com.github.andreyasadchy.xtra.ui.saved.downloads
 
 import android.content.ContentResolver
+import android.content.Context
 import android.text.format.DateUtils
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.LinearLayout
 import androidx.appcompat.widget.PopupMenu
 import androidx.core.net.toUri
-import androidx.core.view.isVisible
 import androidx.fragment.app.Fragment
 import androidx.navigation.fragment.findNavController
 import androidx.paging.PagingDataAdapter
@@ -26,6 +25,7 @@ import com.bumptech.glide.load.engine.DiskCacheStrategy
 import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions
 import com.github.andreyasadchy.xtra.R
 import com.github.andreyasadchy.xtra.databinding.FragmentDownloadsListItemBinding
+import com.github.andreyasadchy.xtra.model.ui.DownloadProgress
 import com.github.andreyasadchy.xtra.model.ui.OfflineVideo
 import com.github.andreyasadchy.xtra.ui.channel.ChannelPagerFragmentDirections
 import com.github.andreyasadchy.xtra.ui.game.GameMediaFragmentDirections
@@ -33,15 +33,11 @@ import com.github.andreyasadchy.xtra.ui.game.GamePagerFragmentDirections
 import com.github.andreyasadchy.xtra.ui.main.MainActivity
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
-import com.github.andreyasadchy.xtra.util.convertDpToPixels
-import com.github.andreyasadchy.xtra.util.gone
 import com.github.andreyasadchy.xtra.util.prefs
-import com.github.andreyasadchy.xtra.util.visible
 import kotlin.math.min
 
 class DownloadsAdapter(
     private val fragment: Fragment,
-    private val checkDownloadStatus: (OfflineVideo) -> Unit,
     private val stopDownload: (OfflineVideo) -> Unit,
     private val resumeDownload: (OfflineVideo) -> Unit,
     private val convertVideo: (OfflineVideo) -> Unit,
@@ -69,6 +65,96 @@ class DownloadsAdapter(
         holder.bind(getItem(position))
     }
 
+    var activeVideoDownloads: List<DownloadProgress>? = null
+    var activeStreamDownloads: List<DownloadProgress>? = null
+
+    fun updateStatus(binding: FragmentDownloadsListItemBinding, context: Context, item: OfflineVideo, progress: DownloadProgress?) {
+        with(binding) {
+            val itemStatus = if ((item.status == OfflineVideo.STATUS_DOWNLOADING || item.status == OfflineVideo.STATUS_QUEUED || item.status == OfflineVideo.STATUS_WAITING_FOR_STREAM) && progress == null) {
+                OfflineVideo.STATUS_PENDING
+            } else {
+                item.status
+            }
+            options.setOnClickListener { it ->
+                PopupMenu(context, it).apply {
+                    inflate(R.menu.offline_item)
+                    when (itemStatus) {
+                        OfflineVideo.STATUS_DOWNLOADING, OfflineVideo.STATUS_QUEUED, OfflineVideo.STATUS_WAITING_FOR_NETWORK, OfflineVideo.STATUS_WAITING_FOR_WIFI, OfflineVideo.STATUS_WAITING_FOR_STREAM -> {
+                            menu.findItem(R.id.stopDownload).isVisible = true
+                        }
+                        OfflineVideo.STATUS_PENDING -> {
+                            if (item.live) {
+                                menu.findItem(R.id.stopDownload).isVisible = true
+                            }
+                            menu.findItem(R.id.resumeDownload).isVisible = true
+                        }
+                        else -> {
+                            menu.findItem(R.id.moveVideo).apply {
+                                isVisible = true
+                                title = context.getString(
+                                    if (item.url?.toUri()?.scheme == ContentResolver.SCHEME_CONTENT) {
+                                        R.string.move_to_app_storage
+                                    } else {
+                                        R.string.move_to_shared_storage
+                                    }
+                                )
+                            }
+                            if (item.url?.endsWith(".m3u8") == true) {
+                                menu.findItem(R.id.convertVideo).isVisible = true
+                            }
+                            menu.findItem(R.id.updateChatUrl).isVisible = true
+                            if (item.url?.toUri()?.scheme == ContentResolver.SCHEME_CONTENT) {
+                                menu.findItem(R.id.shareVideo).isVisible = true
+                            }
+                        }
+                    }
+                    setOnMenuItemClickListener {
+                        when (it.itemId) {
+                            R.id.stopDownload -> stopDownload(item)
+                            R.id.resumeDownload -> resumeDownload(item)
+                            R.id.convertVideo -> convertVideo(item)
+                            R.id.moveVideo -> moveVideo(item)
+                            R.id.updateChatUrl -> updateChatUrl(item)
+                            R.id.shareVideo -> shareVideo(item)
+                            R.id.delete -> deleteVideo(item)
+                            else -> menu.close()
+                        }
+                        true
+                    }
+                    show()
+                }
+            }
+            if (itemStatus == OfflineVideo.STATUS_DOWNLOADED) {
+                status.visibility = View.GONE
+            } else {
+                downloadProgress.text = when (itemStatus) {
+                    OfflineVideo.STATUS_DOWNLOADING -> {
+                        if (item.live || progress == null) {
+                            context.getString(R.string.downloading)
+                        } else {
+                            context.getString(R.string.downloading_progress, ((progress.progress.toFloat() / progress.maxProgress) * 100f).toInt())
+                        }
+                    }
+                    OfflineVideo.STATUS_MOVING -> context.getString(R.string.download_moving, ((item.progress.toFloat() / item.maxProgress) * 100f).toInt())
+                    OfflineVideo.STATUS_DELETING -> context.getString(R.string.download_deleting, ((item.progress.toFloat() / item.maxProgress) * 100f).toInt())
+                    OfflineVideo.STATUS_CONVERTING -> context.getString(R.string.download_converting, ((item.progress.toFloat() / item.maxProgress) * 100f).toInt())
+                    OfflineVideo.STATUS_QUEUED -> context.getString(R.string.download_queued)
+                    OfflineVideo.STATUS_WAITING_FOR_NETWORK -> context.getString(R.string.download_blocked)
+                    OfflineVideo.STATUS_WAITING_FOR_WIFI -> context.getString(R.string.download_blocked_wifi)
+                    OfflineVideo.STATUS_WAITING_FOR_STREAM -> context.getString(R.string.download_waiting_for_stream)
+                    else -> context.getString(R.string.download_pending)
+                }
+                if (item.downloadChat && itemStatus == OfflineVideo.STATUS_DOWNLOADING && progress != null && !item.live) {
+                    chatDownloadProgress.visibility = View.VISIBLE
+                    chatDownloadProgress.text = context.getString(R.string.chat_downloading_progress, min(((progress.chatProgress.toFloat() / progress.maxChatProgress) * 100f).toInt(), 100))
+                } else {
+                    chatDownloadProgress.visibility = View.GONE
+                }
+                status.visibility = View.VISIBLE
+            }
+        }
+    }
+
     inner class PagingViewHolder(
         private val binding: FragmentDownloadsListItemBinding,
         private val fragment: Fragment,
@@ -83,14 +169,14 @@ class DownloadsAdapter(
                                 channelId = item.channelId,
                                 channelLogin = item.channelLogin,
                                 channelName = item.channelName,
-                                channelLogo = item.channelLogo,
+                                channelImage = item.channelLogo,
                                 updateLocal = true
                             )
                         )
                     }
                     val gameListener: (View) -> Unit = {
                         fragment.findNavController().navigate(
-                            if (context.prefs().getBoolean(C.UI_GAMEPAGER, true)) {
+                            if (context.prefs().getBoolean(C.UI_GAME_PAGER, true)) {
                                 GamePagerFragmentDirections.actionGlobalGamePagerFragment(
                                     gameId = item.gameId,
                                     gameSlug = item.gameSlug,
@@ -105,10 +191,23 @@ class DownloadsAdapter(
                             }
                         )
                     }
+                    val videoDuration = item.duration
+                    val position = item.lastWatchPosition
+                    val startFromBeginning = position != null && videoDuration != null && videoDuration > 0 && position >= videoDuration
                     root.setOnClickListener {
-                        (fragment.activity as MainActivity).startOfflineVideo(item)
+                        (fragment.activity as MainActivity).startOfflineVideo(
+                            item,
+                            if (startFromBeginning) {
+                                0
+                            } else {
+                                null
+                            }
+                        )
                     }
-                    root.setOnLongClickListener { deleteVideo(item); true }
+                    root.setOnLongClickListener {
+                        deleteVideo(item)
+                        true
+                    }
                     if (item.thumbnail?.toUri()?.scheme == ContentResolver.SCHEME_CONTENT) {
                         Glide.with(fragment)
                             .load(item.thumbnail)
@@ -125,36 +224,37 @@ class DownloadsAdapter(
                             }.build()
                         )
                     }
-                    item.uploadDate?.let {
-                        date.visible()
-                        date.text = context.getString(R.string.uploaded_date, TwitchApiHelper.formatTime(context, it))
-                    } ?: {
-                        date.gone()
+                    val uploadDate = item.uploadDate
+                    if (uploadDate != null) {
+                        date.visibility = View.VISIBLE
+                        date.text = context.getString(R.string.uploaded_date, TwitchApiHelper.formatDate(context, uploadDate))
+                    } else {
+                        date.visibility = View.GONE
                     }
                     if (item.downloadDate != null) {
-                        downloadDate.visible()
-                        downloadDate.text = context.getString(R.string.downloaded_date, TwitchApiHelper.formatTime(context, item.downloadDate))
+                        downloadDate.visibility = View.VISIBLE
+                        downloadDate.text = context.getString(R.string.downloaded_date, TwitchApiHelper.formatDate(context, item.downloadDate))
                     } else {
-                        downloadDate.gone()
+                        downloadDate.visibility = View.GONE
                     }
                     if (item.type != null) {
                         val text = TwitchApiHelper.getType(context, item.type)
                         if (text != null) {
-                            type.visible()
+                            type.visibility = View.VISIBLE
                             type.text = text
                         } else {
-                            type.gone()
+                            type.visibility = View.GONE
                         }
                     } else {
-                        type.gone()
+                        type.visibility = View.GONE
                     }
                     if (item.channelLogo != null) {
-                        userImage.visible()
+                        userImage.visibility = View.VISIBLE
                         fragment.requireContext().imageLoader.enqueue(
                             ImageRequest.Builder(fragment.requireContext()).apply {
                                 data(item.channelLogo)
                                 diskCachePolicy(CachePolicy.DISABLED)
-                                if (context.prefs().getBoolean(C.UI_ROUNDUSERIMAGE, true)) {
+                                if (context.prefs().getBoolean(C.UI_ROUND_USER_IMAGE, true)) {
                                     transformations(CircleCropTransformation())
                                 }
                                 crossfade(true)
@@ -163,10 +263,10 @@ class DownloadsAdapter(
                         )
                         userImage.setOnClickListener(channelListener)
                     } else {
-                        userImage.gone()
+                        userImage.visibility = View.GONE
                     }
                     if (item.channelName != null) {
-                        username.visible()
+                        username.visibility = View.VISIBLE
                         username.text = if (item.channelLogin != null && !item.channelLogin.equals(item.channelName, true)) {
                             when (context.prefs().getString(C.UI_NAME_DISPLAY, "0")) {
                                 "0" -> "${item.channelName}(${item.channelLogin})"
@@ -178,146 +278,53 @@ class DownloadsAdapter(
                         }
                         username.setOnClickListener(channelListener)
                     } else {
-                        username.gone()
+                        username.visibility = View.GONE
                     }
-                    item.name?.let {
-                        title.visible()
-                        title.text = it.trim()
-                    } ?: {
-                        title.gone()
+                    val name = item.name
+                    if (name != null) {
+                        title.visibility = View.VISIBLE
+                        title.text = name.trim()
+                    } else {
+                        title.visibility = View.GONE
                     }
                     if (item.gameName != null) {
-                        gameName.visible()
+                        gameName.visibility = View.VISIBLE
                         gameName.text = item.gameName
                         gameName.setOnClickListener(gameListener)
                     } else {
-                        gameName.gone()
+                        gameName.visibility = View.GONE
                     }
-                    item.duration?.let { itemDuration ->
-                        duration.visible()
-                        duration.text = DateUtils.formatElapsedTime(itemDuration / 1000L)
-                        item.sourceStartPosition?.let { sourceStartPosition ->
-                            sourceStart.visible()
-                            sourceStart.text = context.getString(R.string.source_vod_start, DateUtils.formatElapsedTime(sourceStartPosition / 1000L))
-                            sourceEnd.visible()
-                            sourceEnd.text = context.getString(R.string.source_vod_end, DateUtils.formatElapsedTime((sourceStartPosition + itemDuration) / 1000L))
-                        } ?: {
-                            sourceStart.gone()
-                            sourceEnd.gone()
-                        }
-                        if (context.prefs().getBoolean(C.PLAYER_USE_VIDEOPOSITIONS, true) && item.lastWatchPosition != null && itemDuration > 0L) {
-                            progressBar.progress = (item.lastWatchPosition!!.toFloat() / itemDuration * 100).toInt()
-                            progressBar.visible()
+                    if (videoDuration != null) {
+                        duration.visibility = View.VISIBLE
+                        duration.text = DateUtils.formatElapsedTime(videoDuration / 1000L)
+                        val startPosition = item.sourceStartPosition
+                        if (startPosition != null) {
+                            sourceStart.visibility = View.VISIBLE
+                            sourceStart.text = context.getString(R.string.source_vod_start, DateUtils.formatElapsedTime(startPosition / 1000L))
+                            sourceEnd.visibility = View.VISIBLE
+                            sourceEnd.text = context.getString(R.string.source_vod_end, DateUtils.formatElapsedTime((startPosition + videoDuration) / 1000L))
                         } else {
-                            progressBar.gone()
+                            sourceStart.visibility = View.GONE
+                            sourceEnd.visibility = View.GONE
                         }
-                    } ?: {
-                        duration.gone()
-                        sourceStart.gone()
-                        sourceEnd.gone()
-                        progressBar.gone()
-                    }
-                    if (sourceEnd.isVisible && sourceStart.isVisible) {
-                        val params = LinearLayout.LayoutParams(
-                            LinearLayout.LayoutParams.WRAP_CONTENT,
-                            LinearLayout.LayoutParams.WRAP_CONTENT
-                        )
-                        params.setMargins(0, context.convertDpToPixels(5F), 0, 0)
-                        sourceEnd.layoutParams = params
-                    }
-                    if (type.isVisible && (sourceStart.isVisible || sourceEnd.isVisible)) {
-                        val params = LinearLayout.LayoutParams(
-                            LinearLayout.LayoutParams.WRAP_CONTENT,
-                            LinearLayout.LayoutParams.WRAP_CONTENT
-                        )
-                        params.setMargins(0, context.convertDpToPixels(5F), 0, 0)
-                        type.layoutParams = params
-                    }
-                    options.setOnClickListener { it ->
-                        PopupMenu(context, it).apply {
-                            inflate(R.menu.offline_item)
-                            when (item.status) {
-                                OfflineVideo.STATUS_DOWNLOADING, OfflineVideo.STATUS_BLOCKED, OfflineVideo.STATUS_QUEUED, OfflineVideo.STATUS_QUEUED_WIFI, OfflineVideo.STATUS_WAITING_FOR_STREAM -> {
-                                    menu.findItem(R.id.stopDownload).isVisible = true
-                                }
-                                OfflineVideo.STATUS_PENDING -> {
-                                    if (item.live) {
-                                        menu.findItem(R.id.stopDownload).isVisible = true
-                                    }
-                                    menu.findItem(R.id.resumeDownload).isVisible = true
-                                }
-                                else -> {
-                                    menu.findItem(R.id.moveVideo).apply {
-                                        isVisible = true
-                                        title = context.getString(
-                                            if (item.url?.toUri()?.scheme == ContentResolver.SCHEME_CONTENT) {
-                                                R.string.move_to_app_storage
-                                            } else {
-                                                R.string.move_to_shared_storage
-                                            }
-                                        )
-                                    }
-                                    if (item.url?.endsWith(".m3u8") == true) {
-                                        menu.findItem(R.id.convertVideo).isVisible = true
-                                    }
-                                    menu.findItem(R.id.updateChatUrl).isVisible = true
-                                    if (item.url?.toUri()?.scheme == ContentResolver.SCHEME_CONTENT) {
-                                        menu.findItem(R.id.shareVideo).isVisible = true
-                                    }
-                                }
-                            }
-                            setOnMenuItemClickListener {
-                                when (it.itemId) {
-                                    R.id.stopDownload -> stopDownload(item)
-                                    R.id.resumeDownload -> resumeDownload(item)
-                                    R.id.convertVideo -> convertVideo(item)
-                                    R.id.moveVideo -> moveVideo(item)
-                                    R.id.updateChatUrl -> updateChatUrl(item)
-                                    R.id.shareVideo -> shareVideo(item)
-                                    R.id.delete -> deleteVideo(item)
-                                    else -> menu.close()
-                                }
-                                true
-                            }
-                            show()
+                        if (context.prefs().getBoolean(C.PLAYER_USE_VIDEO_POSITIONS, true) && position != null && videoDuration > 0L) {
+                            progressBar.progress = ((position.toFloat() / videoDuration) * 100).toInt()
+                            progressBar.visibility = View.VISIBLE
+                        } else {
+                            progressBar.visibility = View.GONE
                         }
-                    }
-                    if (item.status == OfflineVideo.STATUS_DOWNLOADED) {
-                        status.gone()
                     } else {
-                        downloadProgress.text = when (item.status) {
-                            OfflineVideo.STATUS_DOWNLOADING -> {
-                                if (item.live) {
-                                    context.getString(R.string.downloading)
-                                } else {
-                                    context.getString(R.string.downloading_progress, ((item.progress.toFloat() / item.maxProgress) * 100f).toInt())
-                                }
-                            }
-                            OfflineVideo.STATUS_MOVING -> context.getString(R.string.download_moving, ((item.progress.toFloat() / item.maxProgress) * 100f).toInt())
-                            OfflineVideo.STATUS_DELETING -> context.getString(R.string.download_deleting, ((item.progress.toFloat() / item.maxProgress) * 100f).toInt())
-                            OfflineVideo.STATUS_CONVERTING -> context.getString(R.string.download_converting, ((item.progress.toFloat() / item.maxProgress) * 100f).toInt())
-                            OfflineVideo.STATUS_BLOCKED -> context.getString(R.string.download_queued)
-                            OfflineVideo.STATUS_QUEUED -> context.getString(R.string.download_blocked)
-                            OfflineVideo.STATUS_QUEUED_WIFI -> context.getString(R.string.download_blocked_wifi)
-                            OfflineVideo.STATUS_WAITING_FOR_STREAM -> context.getString(R.string.download_waiting_for_stream)
-                            else -> context.getString(R.string.download_pending)
-                        }
-                        if (item.downloadChat && item.status == OfflineVideo.STATUS_DOWNLOADING && !item.live) {
-                            chatDownloadProgress.visible()
-                            chatDownloadProgress.text = context.getString(R.string.chat_downloading_progress, min(((item.chatProgress.toFloat() / item.maxChatProgress) * 100f).toInt(), 100))
-                        } else {
-                            chatDownloadProgress.gone()
-                        }
-                        status.visible()
-                        if (item.status == OfflineVideo.STATUS_DOWNLOADING ||
-                            item.status == OfflineVideo.STATUS_BLOCKED ||
-                            item.status == OfflineVideo.STATUS_QUEUED ||
-                            item.status == OfflineVideo.STATUS_QUEUED_WIFI ||
-                            item.status == OfflineVideo.STATUS_WAITING_FOR_STREAM
-                        ) {
-                            checkDownloadStatus(item)
-                        }
+                        duration.visibility = View.GONE
+                        sourceStart.visibility = View.GONE
+                        sourceEnd.visibility = View.GONE
+                        progressBar.visibility = View.GONE
                     }
+                    val progress = if (item.live) {
+                        activeStreamDownloads?.find { it.id == item.id }
+                    } else {
+                        activeVideoDownloads?.find { it.id == item.id }
+                    }
+                    updateStatus(binding, context, item, progress)
                 }
             }
         }

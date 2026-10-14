@@ -4,6 +4,7 @@ import androidx.paging.PagingSource
 import androidx.paging.PagingState
 import com.github.andreyasadchy.xtra.model.ui.Tag
 import com.github.andreyasadchy.xtra.repository.GraphQLRepository
+import com.github.andreyasadchy.xtra.util.C
 
 class TagsDataSource(
     private val getGameTags: Boolean,
@@ -15,39 +16,98 @@ class TagsDataSource(
 ) : PagingSource<Int, Tag>() {
 
     override suspend fun load(params: LoadParams<Int>): LoadResult<Int, Tag> {
-        return try {
-            val response = query.takeIf { it.isNotBlank() }?.let {
-                if (getGameTags) {
-                    val response = graphQLRepository.loadGameTags(networkLibrary, gqlHeaders, query, 100)
-                    if (enableIntegrity) {
-                        response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
-                    }
-                    response.data?.searchCategoryTags?.map {
-                        Tag(
-                            id = it.id,
-                            name = it.localizedName,
-                            scope = it.scope
-                        )
-                    }
-                } else {
-                    val response = graphQLRepository.loadFreeformTags(networkLibrary, gqlHeaders, query, 100)
-                    if (enableIntegrity) {
-                        response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
-                    }
-                    response.data?.searchFreeformTags?.edges?.map { edge ->
-                        Tag(
-                            name = edge.node.tagName
-                        )
-                    }
+        return if (query.isNotBlank()) {
+            try {
+                gqlQueryLoad()
+            } catch (e: Exception) {
+                try {
+                    gqlLoad()
+                } catch (e: Exception) {
+                    LoadResult.Error(e)
                 }
-            } ?: emptyList()
+            }
+        } else {
             LoadResult.Page(
-                data = response,
+                data = emptyList(),
                 prevKey = null,
                 nextKey = null
             )
-        } catch (e: Exception) {
-            LoadResult.Error(e)
+        }
+    }
+
+    private suspend fun gqlQueryLoad(): LoadResult<Int, Tag> {
+        return if (getGameTags) {
+            val response = graphQLRepository.loadQuerySearchGameTags(networkLibrary, gqlHeaders, query, 100)
+            if (enableIntegrity) {
+                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
+            }
+            val list = response.data!!.searchCategoryTags!!.map { item ->
+                Tag(
+                    id = item.id,
+                    name = item.localizedName,
+                )
+            }
+            LoadResult.Page(
+                data = list,
+                prevKey = null,
+                nextKey = null
+            )
+        } else {
+            val response = graphQLRepository.loadQuerySearchFreeformTags(networkLibrary, gqlHeaders, query, 100)
+            if (enableIntegrity) {
+                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
+            }
+            val data = response.data!!.searchFreeformTags!!
+            val items = data.edges!!
+            val list = items.mapNotNull { item ->
+                item?.node?.let {
+                    Tag(
+                        name = it.tagName
+                    )
+                }
+            }
+            LoadResult.Page(
+                data = list,
+                prevKey = null,
+                nextKey = null
+            )
+        }
+    }
+
+    private suspend fun gqlLoad(): LoadResult<Int, Tag> {
+        return if (getGameTags) {
+            val response = graphQLRepository.loadGameTags(networkLibrary, gqlHeaders, query, 100)
+            if (enableIntegrity) {
+                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
+            }
+            val list = response.data!!.searchCategoryTags.map {
+                Tag(
+                    id = it.id,
+                    name = it.localizedName,
+                )
+            }
+            LoadResult.Page(
+                data = list,
+                prevKey = null,
+                nextKey = null
+            )
+        } else {
+            val response = graphQLRepository.loadFreeformTags(networkLibrary, gqlHeaders, query, 100)
+            if (enableIntegrity) {
+                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
+            }
+            val data = response.data!!.searchFreeformTags
+            val items = data.edges
+            val list = items.map { item ->
+                Tag(
+                    name = item.node.tagName
+                )
+            }
+            LoadResult.Page(
+                data = list,
+                prevKey = null,
+                nextKey = null
+            )
         }
     }
 

@@ -2,11 +2,11 @@ package com.github.andreyasadchy.xtra.repository.datasource
 
 import androidx.paging.PagingSource
 import androidx.paging.PagingState
+import com.github.andreyasadchy.xtra.graphql.type.Language
+import com.github.andreyasadchy.xtra.graphql.type.StreamSort
 import com.github.andreyasadchy.xtra.model.ui.Stream
 import com.github.andreyasadchy.xtra.repository.GraphQLRepository
 import com.github.andreyasadchy.xtra.repository.HelixRepository
-import com.github.andreyasadchy.xtra.type.Language
-import com.github.andreyasadchy.xtra.type.StreamSort
 import com.github.andreyasadchy.xtra.util.C
 
 class StreamsDataSource(
@@ -20,7 +20,6 @@ class StreamsDataSource(
     private val helixHeaders: Map<String, String>,
     private val helixRepository: HelixRepository,
     private val enableIntegrity: Boolean,
-    private val apiPref: List<String>,
     private val networkLibrary: String?,
 ) : PagingSource<Int, Stream>() {
     private var api: String? = null
@@ -29,19 +28,22 @@ class StreamsDataSource(
     override suspend fun load(params: LoadParams<Int>): LoadResult<Int, Stream> {
         return if (!offset.isNullOrBlank()) {
             try {
-                loadFromApi(api, params)
+                loadFromApi(params)
             } catch (e: Exception) {
                 LoadResult.Error(e)
             }
         } else {
             try {
-                loadFromApi(apiPref.getOrNull(0), params)
+                api = C.GQL
+                loadFromApi(params)
             } catch (e: Exception) {
                 try {
-                    loadFromApi(apiPref.getOrNull(1), params)
+                    api = C.GQL_PERSISTED_QUERY
+                    loadFromApi(params)
                 } catch (e: Exception) {
                     try {
-                        loadFromApi(apiPref.getOrNull(2), params)
+                        api = C.HELIX
+                        loadFromApi(params)
                     } catch (e: Exception) {
                         LoadResult.Error(e)
                     }
@@ -50,9 +52,8 @@ class StreamsDataSource(
         }
     }
 
-    private suspend fun loadFromApi(apiPref: String?, params: LoadParams<Int>): LoadResult<Int, Stream> {
-        api = apiPref
-        return when (apiPref) {
+    private suspend fun loadFromApi(params: LoadParams<Int>): LoadResult<Int, Stream> {
+        return when (api) {
             C.GQL -> gqlQueryLoad(params)
             C.GQL_PERSISTED_QUERY -> gqlLoad(params)
             C.HELIX -> if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank() && tags.isNullOrEmpty() && gqlQueryLanguages.isNullOrEmpty() && gqlLanguages.isNullOrEmpty()) helixLoad(params) else throw Exception()
@@ -63,7 +64,7 @@ class StreamsDataSource(
     private suspend fun gqlQueryLoad(params: LoadParams<Int>): LoadResult<Int, Stream> {
         val response = graphQLRepository.loadQueryTopStreams(networkLibrary, gqlHeaders, gqlQuerySort, tags, gqlQueryLanguages, params.loadSize, offset)
         if (enableIntegrity) {
-            response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
+            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
         }
         val data = response.data!!.streams!!
         val items = data.edges!!
@@ -74,17 +75,18 @@ class StreamsDataSource(
                     channelId = it.broadcaster?.id,
                     channelLogin = it.broadcaster?.login,
                     channelName = it.broadcaster?.displayName,
+                    channelImageURL = it.broadcaster?.profileImageURL,
                     gameId = it.game?.id,
                     gameSlug = it.game?.slug,
                     gameName = it.game?.displayName,
-                    type = it.type,
                     title = it.broadcaster?.broadcastSettings?.title,
+                    thumbnailURL = it.previewImageURL,
+                    createdAt = it.createdAt?.toString(),
                     viewerCount = it.viewersCount,
-                    startedAt = it.createdAt?.toString(),
-                    thumbnailUrl = it.previewImageURL,
-                    profileImageUrl = it.broadcaster?.profileImageURL,
-                    tags = it.freeformTags?.mapNotNull { tag -> tag.name }
-                )
+                    tags = it.freeformTags?.mapNotNull { tag -> tag.name },
+                ).takeIf { stream ->
+                    stream.channelId != null || stream.channelLogin != null
+                }
             }
         }
         offset = items.lastOrNull()?.cursor?.toString()
@@ -101,28 +103,29 @@ class StreamsDataSource(
     private suspend fun gqlLoad(params: LoadParams<Int>): LoadResult<Int, Stream> {
         val response = graphQLRepository.loadTopStreams(networkLibrary, gqlHeaders, gqlSort, tags, gqlLanguages, params.loadSize, offset)
         if (enableIntegrity) {
-            response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
+            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
         }
         val data = response.data!!.streams
         val items = data.edges
-        val list = items.map { item ->
+        val list = items.mapNotNull { item ->
             item.node.let {
                 Stream(
                     id = it.id,
                     channelId = it.broadcaster?.id,
                     channelLogin = it.broadcaster?.login,
                     channelName = it.broadcaster?.displayName,
+                    channelImageURL = it.broadcaster?.profileImageURL,
                     gameId = it.game?.id,
                     gameSlug = it.game?.slug,
                     gameName = it.game?.displayName,
-                    type = it.type,
                     title = it.title,
+                    thumbnailURL = it.previewImageURL,
+                    createdAt = it.createdAt,
                     viewerCount = it.viewersCount,
-                    startedAt = it.createdAt,
-                    thumbnailUrl = it.previewImageURL,
-                    profileImageUrl = it.broadcaster?.profileImageURL,
-                    tags = it.freeformTags?.mapNotNull { tag -> tag.name }
-                )
+                    tags = it.freeformTags?.mapNotNull { tag -> tag.name },
+                ).takeIf { stream ->
+                    stream.channelId != null || stream.channelLogin != null
+                }
             }
         }
         offset = items.lastOrNull()?.cursor
@@ -150,24 +153,25 @@ class StreamsDataSource(
                 ids = it
             ).data
         }
-        val list = response.data.map {
+        val list = response.data.mapNotNull {
             Stream(
                 id = it.id,
                 channelId = it.channelId,
                 channelLogin = it.channelLogin,
                 channelName = it.channelName,
+                channelImageURL = it.channelId?.let { id ->
+                    users.find { user -> user.id == id }?.profileImageURL
+                },
                 gameId = it.gameId,
                 gameName = it.gameName,
-                type = it.type,
                 title = it.title,
+                thumbnailURL = it.thumbnailURL,
+                createdAt = it.startedAt,
                 viewerCount = it.viewerCount,
-                startedAt = it.startedAt,
-                thumbnailUrl = it.thumbnailUrl,
-                profileImageUrl = it.channelId?.let { id ->
-                    users.find { user -> user.channelId == id }?.profileImageUrl
-                },
-                tags = it.tags
-            )
+                tags = it.tags,
+            ).takeIf { stream ->
+                stream.channelId != null || stream.channelLogin != null
+            }
         }
         offset = response.pagination?.cursor
         return LoadResult.Page(

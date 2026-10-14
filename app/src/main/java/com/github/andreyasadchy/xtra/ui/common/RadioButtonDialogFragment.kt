@@ -12,7 +12,6 @@ import android.widget.RadioButton
 import android.widget.RadioGroup
 import androidx.appcompat.widget.AppCompatRadioButton
 import androidx.core.content.res.use
-import androidx.core.os.bundleOf
 import androidx.core.view.setPadding
 import androidx.core.widget.NestedScrollView
 import com.github.andreyasadchy.xtra.R
@@ -23,7 +22,7 @@ import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 class RadioButtonDialogFragment : BottomSheetDialogFragment() {
 
     interface OnSortOptionChanged {
-        fun onChange(requestCode: Int, index: Int, text: CharSequence, tag: Int?)
+        fun onChange(requestCode: Int, index: Int, text: CharSequence, tag: String?, tag2: String?)
     }
 
     companion object {
@@ -31,11 +30,18 @@ class RadioButtonDialogFragment : BottomSheetDialogFragment() {
         private const val REQUEST_CODE = "requestCode"
         private const val LABELS = "labels"
         private const val TAGS = "tags"
+        private const val TAGS2 = "tags2"
         private const val CHECKED = "checked"
 
-        fun newInstance(requestCode: Int, labels: Collection<CharSequence>, tags: IntArray? = null, checkedIndex: Int): RadioButtonDialogFragment {
+        fun newInstance(requestCode: Int, labels: Collection<CharSequence>, tags: Array<String>? = null, tags2: Array<String>? = null, checkedIndex: Int): RadioButtonDialogFragment {
             return RadioButtonDialogFragment().apply {
-                arguments = bundleOf(REQUEST_CODE to requestCode, LABELS to ArrayList(labels), TAGS to tags, CHECKED to checkedIndex)
+                arguments = Bundle().apply {
+                    putInt(REQUEST_CODE, requestCode)
+                    putCharSequenceArrayList(LABELS, ArrayList(labels))
+                    putStringArray(TAGS, tags)
+                    putStringArray(TAGS2, tags2)
+                    putInt(CHECKED, checkedIndex)
+                }
             }
         }
     }
@@ -58,19 +64,20 @@ class RadioButtonDialogFragment : BottomSheetDialogFragment() {
             }
         }
         val checkedId = arguments.getInt(CHECKED)
+        val tags2 = arguments.getStringArray(TAGS2)
         val clickListener = View.OnClickListener { v ->
             val clickedId = v.id
             if (clickedId != checkedId) {
-                listenerSort.onChange(arguments.getInt(REQUEST_CODE), clickedId, (v as RadioButton).text, v.tag as Int?)
+                listenerSort.onChange(arguments.getInt(REQUEST_CODE), clickedId, (v as RadioButton).text, v.tag as String?, tags2?.getOrNull(clickedId)?.takeIf { it != "null" })
             }
             dismiss()
         }
-        val tags = arguments.getIntArray(TAGS)
+        val tags = arguments.getStringArray(TAGS)
         arguments.getCharSequenceArrayList(LABELS)?.forEachIndexed { index, label ->
             val button = AppCompatRadioButton(context).apply {
                 id = index
                 text = label
-                tag = tags?.getOrNull(index)
+                tag = tags?.getOrNull(index)?.takeIf { it != "null" }
                 setOnClickListener(clickListener)
             }
             radioGroup.addView(button, params)

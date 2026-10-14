@@ -21,7 +21,7 @@ import com.github.andreyasadchy.xtra.R
 import com.github.andreyasadchy.xtra.databinding.CommonRecyclerViewLayoutBinding
 import com.github.andreyasadchy.xtra.databinding.SortBarBinding
 import com.github.andreyasadchy.xtra.model.ui.Clip
-import com.github.andreyasadchy.xtra.model.ui.SortGame
+import com.github.andreyasadchy.xtra.model.ui.GameSort
 import com.github.andreyasadchy.xtra.ui.common.ClipsAdapter
 import com.github.andreyasadchy.xtra.ui.common.FragmentHost
 import com.github.andreyasadchy.xtra.ui.common.IntegrityDialog
@@ -31,19 +31,16 @@ import com.github.andreyasadchy.xtra.ui.common.Sortable
 import com.github.andreyasadchy.xtra.ui.common.VideosSortDialog
 import com.github.andreyasadchy.xtra.ui.download.DownloadDialog
 import com.github.andreyasadchy.xtra.ui.game.GamePagerFragmentArgs
-import com.github.andreyasadchy.xtra.util.gone
-import com.github.andreyasadchy.xtra.util.visible
-import dagger.hilt.android.AndroidEntryPoint
+import com.github.andreyasadchy.xtra.ui.game.clips.GameClipsViewModel.Companion.GameClipsViewModelFactory
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
-@AndroidEntryPoint
 class GameClipsFragment : PagedListFragment(), Scrollable, Sortable, VideosSortDialog.OnFilter {
 
     private var _binding: CommonRecyclerViewLayoutBinding? = null
     private val binding get() = _binding!!
     private val args: GamePagerFragmentArgs by navArgs()
-    private val viewModel: GameClipsViewModel by viewModels()
+    private val viewModel: GameClipsViewModel by viewModels { GameClipsViewModelFactory }
     private lateinit var pagingAdapter: PagingDataAdapter<Clip, out RecyclerView.ViewHolder>
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -54,21 +51,22 @@ class GameClipsFragment : PagedListFragment(), Scrollable, Sortable, VideosSortD
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         val showDialog: (Clip) -> Unit = {
-            DownloadDialog.newInstance(
-                clipId = it.id,
-                title = it.title,
-                uploadDate = it.uploadDate,
-                duration = it.duration,
-                videoId = it.videoId,
-                vodOffset = it.vodOffset,
+            DownloadDialog.newClipInstance(
+                id = it.id,
                 channelId = it.channelId,
                 channelLogin = it.channelLogin,
                 channelName = it.channelName,
-                channelLogo = it.channelLogo,
-                thumbnail = it.thumbnail,
+                channelImage = it.channelImage,
                 gameId = it.gameId,
                 gameSlug = it.gameSlug,
                 gameName = it.gameName,
+                title = it.title,
+                thumbnail = it.thumbnail,
+                createdAt = it.createdAt,
+                durationSeconds = it.durationSeconds,
+                videoId = it.videoId,
+                videoOffsetSeconds = it.videoOffsetSeconds,
+                videoCreatedAt = it.videoCreatedAt,
             ).show(childFragmentManager, null)
         }
         pagingAdapter = ClipsAdapter(this, showDialog, showGame = false)
@@ -85,15 +83,15 @@ class GameClipsFragment : PagedListFragment(), Scrollable, Sortable, VideosSortD
     override fun initialize() {
         viewLifecycleOwner.lifecycleScope.launch {
             if (viewModel.filter.value == null) {
-                val sortValues = args.gameId?.let { viewModel.getSortGame(it) } ?: viewModel.getSortGame("default")
+                val sortValues = args.gameId?.let { viewModel.getGameSort(it) } ?: viewModel.getGameSort("default")
                 viewModel.setFilter(
                     period = sortValues?.clipPeriod,
                     languages = sortValues?.clipLanguages?.split(',')?.toTypedArray(),
                 )
-                viewModel.sortText.value = requireContext().getString(
+                viewModel.sortText.value = getString(
                     R.string.sort_and_period,
-                    requireContext().getString(R.string.view_count),
-                    requireContext().getString(
+                    getString(R.string.view_count),
+                    getString(
                         when (viewModel.period) {
                             VideosSortDialog.PERIOD_DAY -> R.string.today
                             VideosSortDialog.PERIOD_WEEK -> R.string.this_week
@@ -104,7 +102,7 @@ class GameClipsFragment : PagedListFragment(), Scrollable, Sortable, VideosSortD
                     )
                 )
                 viewModel.filtersText.value = if (viewModel.languages.isNotEmpty()) {
-                    requireContext().resources.getQuantityString(R.plurals.languages, viewModel.languages.size, viewModel.languages.joinToString())
+                    resources.getQuantityString(R.plurals.languages, viewModel.languages.size, viewModel.languages.joinToString())
                 } else null
             }
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -117,14 +115,14 @@ class GameClipsFragment : PagedListFragment(), Scrollable, Sortable, VideosSortD
     }
 
     override fun setupSortBar(sortBar: SortBarBinding) {
-        sortBar.root.visible()
+        sortBar.root.visibility = View.VISIBLE
         sortBar.root.setOnClickListener {
             viewLifecycleOwner.lifecycleScope.launch {
                 VideosSortDialog.newInstance(
                     sort = VideosSortDialog.SORT_VIEWS,
                     period = viewModel.period,
                     languages = viewModel.languages,
-                    saved = args.gameId?.let { viewModel.getSortGame(it) } != null
+                    saved = args.gameId?.let { viewModel.getGameSort(it) } != null
                 ).show(childFragmentManager, null)
             }
         }
@@ -139,10 +137,10 @@ class GameClipsFragment : PagedListFragment(), Scrollable, Sortable, VideosSortD
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 viewModel.filtersText.collectLatest {
                     if (it != null) {
-                        sortBar.filtersText.visible()
+                        sortBar.filtersText.visibility = View.VISIBLE
                         sortBar.filtersText.text = it
                     } else {
-                        sortBar.filtersText.gone()
+                        sortBar.filtersText.visibility = View.GONE
                     }
                 }
             }
@@ -153,37 +151,37 @@ class GameClipsFragment : PagedListFragment(), Scrollable, Sortable, VideosSortD
         if ((parentFragment as? FragmentHost)?.currentFragment == this) {
             viewLifecycleOwner.lifecycleScope.launch {
                 if (changed) {
-                    binding.scrollTop.gone()
+                    binding.scrollTop.visibility = View.GONE
                     pagingAdapter.submitData(PagingData.empty())
                     viewModel.setFilter(period, languages)
-                    viewModel.sortText.value = requireContext().getString(R.string.sort_and_period, sortText, periodText)
+                    viewModel.sortText.value = getString(R.string.sort_and_period, sortText, periodText)
                     viewModel.filtersText.value = if (languages.isNotEmpty()) {
-                        requireContext().resources.getQuantityString(R.plurals.languages, languages.size, languages.joinToString())
+                        resources.getQuantityString(R.plurals.languages, languages.size, languages.joinToString())
                     } else null
                 }
                 if (saveSort) {
                     args.gameId?.let { id ->
-                        val item = viewModel.getSortGame(id)?.apply {
+                        val item = viewModel.getGameSort(id)?.apply {
                             clipPeriod = period
                             clipLanguages = languages.takeIf { it.isNotEmpty() }?.joinToString(",")
-                        } ?: SortGame(
+                        } ?: GameSort(
                             id = id,
                             clipPeriod = period,
                             clipLanguages = languages.takeIf { it.isNotEmpty() }?.joinToString(",")
                         )
-                        viewModel.saveSortGame(item)
+                        viewModel.saveGameSort(item)
                     }
                 }
                 if (saveDefault) {
-                    val item = viewModel.getSortGame("default")?.apply {
+                    val item = viewModel.getGameSort("default")?.apply {
                         clipPeriod = period
                         clipLanguages = languages.takeIf { it.isNotEmpty() }?.joinToString(",")
-                    } ?: SortGame(
+                    } ?: GameSort(
                         id = "default",
                         clipPeriod = period,
                         clipLanguages = languages.takeIf { it.isNotEmpty() }?.joinToString(",")
                     )
-                    viewModel.saveSortGame(item)
+                    viewModel.saveGameSort(item)
                 }
             }
         }
@@ -192,7 +190,7 @@ class GameClipsFragment : PagedListFragment(), Scrollable, Sortable, VideosSortD
     override fun deleteSavedSort() {
         if ((parentFragment as? FragmentHost)?.currentFragment == this) {
             viewLifecycleOwner.lifecycleScope.launch {
-                args.gameId?.let { viewModel.getSortGame(it) }?.let { viewModel.deleteSortGame(it) }
+                args.gameId?.let { viewModel.getGameSort(it) }?.let { viewModel.deleteGameSort(it) }
             }
         }
     }
@@ -205,10 +203,12 @@ class GameClipsFragment : PagedListFragment(), Scrollable, Sortable, VideosSortD
         pagingAdapter.retry()
     }
 
-    override fun onIntegrityDialogCallback(callback: String?) {
-        (parentFragment as? IntegrityDialog.CallbackListener)?.onIntegrityDialogCallback("refresh")
-        if (callback == "refresh") {
-            pagingAdapter.refresh()
+    override fun onIntegrityTokenLoaded(callback: String?) {
+        (parentFragment as? IntegrityDialog.Listener)?.onIntegrityTokenLoaded("refresh")
+        when (callback) {
+            "refresh" -> {
+                pagingAdapter.refresh()
+            }
         }
     }
 

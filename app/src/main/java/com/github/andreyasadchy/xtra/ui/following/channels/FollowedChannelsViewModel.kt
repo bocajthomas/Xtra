@@ -2,35 +2,35 @@ package com.github.andreyasadchy.xtra.ui.following.channels
 
 import android.content.Context
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.cachedIn
-import com.github.andreyasadchy.xtra.model.ui.SortChannel
+import com.github.andreyasadchy.xtra.XtraApp
+import com.github.andreyasadchy.xtra.model.ui.ChannelSort
 import com.github.andreyasadchy.xtra.repository.BookmarksRepository
+import com.github.andreyasadchy.xtra.repository.ChannelSortRepository
 import com.github.andreyasadchy.xtra.repository.GraphQLRepository
 import com.github.andreyasadchy.xtra.repository.HelixRepository
-import com.github.andreyasadchy.xtra.repository.LocalFollowChannelRepository
-import com.github.andreyasadchy.xtra.repository.OfflineRepository
-import com.github.andreyasadchy.xtra.repository.SortChannelRepository
+import com.github.andreyasadchy.xtra.repository.LocalChannelFollowsRepository
+import com.github.andreyasadchy.xtra.repository.OfflineVideosRepository
 import com.github.andreyasadchy.xtra.repository.datasource.FollowedChannelsDataSource
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
 import com.github.andreyasadchy.xtra.util.prefs
 import com.github.andreyasadchy.xtra.util.tokenPrefs
-import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
-import javax.inject.Inject
 
-@HiltViewModel
-class FollowedChannelsViewModel @Inject constructor(
-    @param:ApplicationContext private val applicationContext: Context,
-    private val sortChannelRepository: SortChannelRepository,
-    private val localFollowsChannel: LocalFollowChannelRepository,
-    private val offlineRepository: OfflineRepository,
+class FollowedChannelsViewModel(
+    private val applicationContext: Context,
+    private val channelSortRepository: ChannelSortRepository,
+    private val localChannelFollowsRepository: LocalChannelFollowsRepository,
+    private val offlineVideosRepository: OfflineVideosRepository,
     private val bookmarksRepository: BookmarksRepository,
     private val graphQLRepository: GraphQLRepository,
     private val helixRepository: HelixRepository,
@@ -45,7 +45,7 @@ class FollowedChannelsViewModel @Inject constructor(
         get() = filter.value?.order ?: FollowedChannelsSortDialog.ORDER_DESC
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    val flow = filter.flatMapLatest { filter ->
+    val flow = filter.flatMapLatest {
         Pager(
             PagingConfig(pageSize = 15, prefetchDistance = 5, initialLoadSize = 15)
         ) {
@@ -62,31 +62,25 @@ class FollowedChannelsViewModel @Inject constructor(
                     FollowedChannelsSortDialog.ORDER_ASC -> "asc"
                     else -> "desc"
                 },
-                localFollowsChannel = localFollowsChannel,
-                offlineRepository = offlineRepository,
+                localChannelFollowsRepository = localChannelFollowsRepository,
+                offlineVideosRepository = offlineVideosRepository,
                 bookmarksRepository = bookmarksRepository,
                 gqlHeaders = TwitchApiHelper.getGQLHeaders(applicationContext, true),
                 graphQLRepository = graphQLRepository,
                 helixHeaders = TwitchApiHelper.getHelixHeaders(applicationContext),
                 helixRepository = helixRepository,
                 enableIntegrity = applicationContext.prefs().getBoolean(C.ENABLE_INTEGRITY, false),
-                apiPref = (applicationContext.prefs().getString(C.API_PREFS_FOLLOWED_CHANNELS, null) ?: C.DEFAULT_API_PREFS_FOLLOWED_CHANNELS).split(',').mapNotNull {
-                    val split = it.split(':')
-                    val key = split[0]
-                    val enabled = split[1] != "0"
-                    if (enabled) key else null
-                },
-                networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+                networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
             )
         }.flow
     }.cachedIn(viewModelScope)
 
-    suspend fun getSortChannel(id: String): SortChannel? {
-        return sortChannelRepository.getById(id)
+    suspend fun getChannelSort(id: String): ChannelSort? {
+        return channelSortRepository.getById(id)
     }
 
-    suspend fun saveSortChannel(item: SortChannel) {
-        sortChannelRepository.save(item)
+    suspend fun saveChannelSort(item: ChannelSort) {
+        channelSortRepository.save(item)
     }
 
     fun setFilter(sort: String?, order: String?) {
@@ -97,4 +91,14 @@ class FollowedChannelsViewModel @Inject constructor(
         val sort: String?,
         val order: String?,
     )
+
+    companion object {
+        val FollowedChannelsViewModelFactory = viewModelFactory {
+            initializer {
+                val application = (this[APPLICATION_KEY] as XtraApp)
+                val xtraModule = application.xtraModule
+                FollowedChannelsViewModel(application.applicationContext, xtraModule.channelSortRepository, xtraModule.localChannelFollowsRepository, xtraModule.offlineVideosRepository, xtraModule.bookmarksRepository, xtraModule.graphQLRepository, xtraModule.helixRepository)
+            }
+        }
+    }
 }

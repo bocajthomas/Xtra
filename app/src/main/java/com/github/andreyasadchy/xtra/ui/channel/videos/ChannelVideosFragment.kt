@@ -20,9 +20,10 @@ import androidx.recyclerview.widget.RecyclerView
 import com.github.andreyasadchy.xtra.R
 import com.github.andreyasadchy.xtra.databinding.CommonRecyclerViewLayoutBinding
 import com.github.andreyasadchy.xtra.databinding.SortBarBinding
-import com.github.andreyasadchy.xtra.model.ui.SortChannel
+import com.github.andreyasadchy.xtra.model.ui.ChannelSort
 import com.github.andreyasadchy.xtra.model.ui.Video
 import com.github.andreyasadchy.xtra.ui.channel.ChannelPagerFragmentArgs
+import com.github.andreyasadchy.xtra.ui.channel.videos.ChannelVideosViewModel.Companion.ChannelVideosViewModelFactory
 import com.github.andreyasadchy.xtra.ui.common.FragmentHost
 import com.github.andreyasadchy.xtra.ui.common.IntegrityDialog
 import com.github.andreyasadchy.xtra.ui.common.PagedListFragment
@@ -33,20 +34,16 @@ import com.github.andreyasadchy.xtra.ui.common.VideosSortDialog
 import com.github.andreyasadchy.xtra.ui.download.DownloadDialog
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
-import com.github.andreyasadchy.xtra.util.gone
 import com.github.andreyasadchy.xtra.util.prefs
-import com.github.andreyasadchy.xtra.util.visible
-import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
-@AndroidEntryPoint
 class ChannelVideosFragment : PagedListFragment(), Scrollable, Sortable, VideosSortDialog.OnFilter {
 
     private var _binding: CommonRecyclerViewLayoutBinding? = null
     private val binding get() = _binding!!
     private val args: ChannelPagerFragmentArgs by navArgs()
-    private val viewModel: ChannelVideosViewModel by viewModels()
+    private val viewModel: ChannelVideosViewModel by viewModels { ChannelVideosViewModelFactory }
     private lateinit var pagingAdapter: PagingDataAdapter<Video, out RecyclerView.ViewHolder>
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -57,27 +54,27 @@ class ChannelVideosFragment : PagedListFragment(), Scrollable, Sortable, VideosS
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         pagingAdapter = VideosAdapter(this, {
-            DownloadDialog.newInstance(
+            DownloadDialog.newVideoInstance(
                 id = it.id,
-                title = it.title,
-                uploadDate = it.uploadDate,
-                duration = it.duration,
-                videoType = it.type,
-                animatedPreviewUrl = it.animatedPreviewURL,
                 channelId = it.channelId,
                 channelLogin = it.channelLogin,
                 channelName = it.channelName,
-                channelLogo = it.channelLogo,
-                thumbnail = it.thumbnail,
+                channelImage = it.channelImage,
                 gameId = it.gameId,
                 gameSlug = it.gameSlug,
                 gameName = it.gameName,
+                title = it.title,
+                thumbnail = it.thumbnail,
+                createdAt = it.createdAt,
+                durationSeconds = it.durationSeconds,
+                type = it.type,
+                animatedPreviewUrl = it.animatedPreviewURL,
             ).show(childFragmentManager, null)
         }, {
             viewModel.saveBookmark(
                 requireContext().filesDir.path,
                 it,
-                requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+                requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
                 TwitchApiHelper.getGQLHeaders(requireContext()),
                 TwitchApiHelper.getHelixHeaders(requireContext()),
             )
@@ -95,21 +92,21 @@ class ChannelVideosFragment : PagedListFragment(), Scrollable, Sortable, VideosS
     override fun initialize() {
         viewLifecycleOwner.lifecycleScope.launch {
             if (viewModel.filter.value == null) {
-                val sortValues = args.channelId?.let { viewModel.getSortChannel(it) } ?: viewModel.getSortChannel("default")
+                val sortValues = args.channelId?.let { viewModel.getChannelSort(it) } ?: viewModel.getChannelSort("default")
                 viewModel.setFilter(
                     sort = sortValues?.videoSort,
                     type = sortValues?.videoType,
                 )
-                viewModel.sortText.value = requireContext().getString(
+                viewModel.sortText.value = getString(
                     R.string.sort_and_type,
-                    requireContext().getString(
+                    getString(
                         when (viewModel.sort) {
                             VideosSortDialog.SORT_TIME -> R.string.upload_date
                             VideosSortDialog.SORT_VIEWS -> R.string.view_count
                             else -> R.string.upload_date
                         }
                     ),
-                    requireContext().getString(
+                    getString(
                         when (viewModel.type) {
                             VideosSortDialog.VIDEO_TYPE_ARCHIVE -> R.string.video_type_archive
                             VideosSortDialog.VIDEO_TYPE_HIGHLIGHT -> R.string.video_type_highlight
@@ -126,7 +123,7 @@ class ChannelVideosFragment : PagedListFragment(), Scrollable, Sortable, VideosS
             }
         }
         initializeAdapter(binding, pagingAdapter)
-        if (requireContext().prefs().getBoolean(C.PLAYER_USE_VIDEOPOSITIONS, true)) {
+        if (requireContext().prefs().getBoolean(C.PLAYER_USE_VIDEO_POSITIONS, true)) {
             viewLifecycleOwner.lifecycleScope.launch {
                 repeatOnLifecycle(Lifecycle.State.STARTED) {
                     viewModel.positions.collectLatest {
@@ -145,14 +142,14 @@ class ChannelVideosFragment : PagedListFragment(), Scrollable, Sortable, VideosS
     }
 
     override fun setupSortBar(sortBar: SortBarBinding) {
-        sortBar.root.visible()
+        sortBar.root.visibility = View.VISIBLE
         sortBar.root.setOnClickListener {
             viewLifecycleOwner.lifecycleScope.launch {
                 VideosSortDialog.newInstance(
                     sort = viewModel.sort,
                     period = viewModel.period,
                     type = viewModel.type,
-                    saved = args.channelId?.let { viewModel.getSortChannel(it) } != null
+                    saved = args.channelId?.let { viewModel.getChannelSort(it) } != null
                 ).show(childFragmentManager, null)
             }
         }
@@ -169,34 +166,34 @@ class ChannelVideosFragment : PagedListFragment(), Scrollable, Sortable, VideosS
         if ((parentFragment as? FragmentHost)?.currentFragment == this) {
             viewLifecycleOwner.lifecycleScope.launch {
                 if (changed) {
-                    binding.scrollTop.gone()
+                    binding.scrollTop.visibility = View.GONE
                     pagingAdapter.submitData(PagingData.empty())
                     viewModel.setFilter(sort, type)
-                    viewModel.sortText.value = requireContext().getString(R.string.sort_and_type, sortText, typeText)
+                    viewModel.sortText.value = getString(R.string.sort_and_type, sortText, typeText)
                 }
                 if (saveSort) {
                     args.channelId?.let { id ->
-                        val item = viewModel.getSortChannel(id)?.apply {
+                        val item = viewModel.getChannelSort(id)?.apply {
                             videoSort = sort
                             videoType = type
-                        } ?: SortChannel(
+                        } ?: ChannelSort(
                             id = id,
                             videoSort = sort,
                             videoType = type
                         )
-                        viewModel.saveSortChannel(item)
+                        viewModel.saveChannelSort(item)
                     }
                 }
                 if (saveDefault) {
-                    val item = viewModel.getSortChannel("default")?.apply {
+                    val item = viewModel.getChannelSort("default")?.apply {
                         videoSort = sort
                         videoType = type
-                    } ?: SortChannel(
+                    } ?: ChannelSort(
                         id = "default",
                         videoSort = sort,
                         videoType = type
                     )
-                    viewModel.saveSortChannel(item)
+                    viewModel.saveChannelSort(item)
                 }
             }
         }
@@ -205,7 +202,7 @@ class ChannelVideosFragment : PagedListFragment(), Scrollable, Sortable, VideosS
     override fun deleteSavedSort() {
         if ((parentFragment as? FragmentHost)?.currentFragment == this) {
             viewLifecycleOwner.lifecycleScope.launch {
-                args.channelId?.let { viewModel.getSortChannel(it) }?.let { viewModel.deleteSortChannel(it) }
+                args.channelId?.let { viewModel.getChannelSort(it) }?.let { viewModel.deleteChannelSort(it) }
             }
         }
     }
@@ -218,10 +215,12 @@ class ChannelVideosFragment : PagedListFragment(), Scrollable, Sortable, VideosS
         pagingAdapter.retry()
     }
 
-    override fun onIntegrityDialogCallback(callback: String?) {
-        (parentFragment as? IntegrityDialog.CallbackListener)?.onIntegrityDialogCallback("refresh")
-        if (callback == "refresh") {
-            pagingAdapter.refresh()
+    override fun onIntegrityTokenLoaded(callback: String?) {
+        (parentFragment as? IntegrityDialog.Listener)?.onIntegrityTokenLoaded("refresh")
+        when (callback) {
+            "refresh" -> {
+                pagingAdapter.refresh()
+            }
         }
     }
 

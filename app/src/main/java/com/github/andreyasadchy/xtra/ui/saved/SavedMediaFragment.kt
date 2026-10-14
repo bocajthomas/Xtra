@@ -25,6 +25,7 @@ import com.github.andreyasadchy.xtra.ui.common.Scrollable
 import com.github.andreyasadchy.xtra.ui.common.Sortable
 import com.github.andreyasadchy.xtra.ui.login.LoginActivity
 import com.github.andreyasadchy.xtra.ui.main.MainActivity
+import com.github.andreyasadchy.xtra.ui.saved.SavedPagerViewModel.Companion.SavedPagerViewModelFactory
 import com.github.andreyasadchy.xtra.ui.saved.bookmarks.BookmarksFragment
 import com.github.andreyasadchy.xtra.ui.saved.downloads.DownloadsFragment
 import com.github.andreyasadchy.xtra.ui.saved.filters.FiltersFragment
@@ -33,19 +34,15 @@ import com.github.andreyasadchy.xtra.ui.settings.SettingsActivity
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
 import com.github.andreyasadchy.xtra.util.getAlertDialogBuilder
-import com.github.andreyasadchy.xtra.util.gone
 import com.github.andreyasadchy.xtra.util.prefs
 import com.github.andreyasadchy.xtra.util.tokenPrefs
-import com.github.andreyasadchy.xtra.util.visible
 import com.google.android.material.textfield.MaterialAutoCompleteTextView
-import dagger.hilt.android.AndroidEntryPoint
 
-@AndroidEntryPoint
 class SavedMediaFragment : Fragment(), Scrollable, FragmentHost {
 
     private var _binding: FragmentMediaBinding? = null
     private val binding get() = _binding!!
-    private val viewModel: SavedPagerViewModel by viewModels()
+    private val viewModel: SavedPagerViewModel by viewModels { SavedPagerViewModelFactory }
     private var folderResultLauncher: ActivityResultLauncher<Intent>? = null
     private var fileResultLauncher: ActivityResultLauncher<Intent>? = null
 
@@ -163,7 +160,7 @@ class SavedMediaFragment : Fragment(), Scrollable, FragmentHost {
                 }
             }
             if (tabs.size > 1) {
-                spinner.visible()
+                spinner.visibility = View.VISIBLE
             }
             (spinner.editText as? MaterialAutoCompleteTextView)?.apply {
                 setSimpleItems(tabs.map {
@@ -209,7 +206,11 @@ class SavedMediaFragment : Fragment(), Scrollable, FragmentHost {
                         appBar.setLiftable(false)
                         appBar.background = null
                     }
-                    (f as? Sortable)?.setupSortBar(sortBar) ?: sortBar.root.gone()
+                    if (f is Sortable) {
+                        f.setupSortBar(sortBar)
+                    } else {
+                        sortBar.root.visibility = View.GONE
+                    }
                     toolbar.menu.findItem(R.id.importFolders).isVisible = f is DownloadsFragment
                     toolbar.menu.findItem(R.id.importFiles).isVisible = f is DownloadsFragment
                 }

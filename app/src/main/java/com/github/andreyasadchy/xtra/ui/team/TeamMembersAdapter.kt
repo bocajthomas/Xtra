@@ -1,5 +1,7 @@
 package com.github.andreyasadchy.xtra.ui.team
 
+import android.text.format.DateUtils
+import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -27,11 +29,10 @@ import com.github.andreyasadchy.xtra.ui.game.GamePagerFragmentDirections
 import com.github.andreyasadchy.xtra.ui.main.MainActivity
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
-import com.github.andreyasadchy.xtra.util.convertDpToPixels
-import com.github.andreyasadchy.xtra.util.gone
 import com.github.andreyasadchy.xtra.util.prefs
-import com.github.andreyasadchy.xtra.util.visible
 import com.google.android.material.R
+import kotlin.time.Clock
+import kotlin.time.Instant
 
 class TeamMembersAdapter(
     private val fragment: Fragment,
@@ -70,17 +71,17 @@ class TeamMembersAdapter(
                                 channelId = item.channelId,
                                 channelLogin = item.channelLogin,
                                 channelName = item.channelName,
-                                channelLogo = item.channelLogo,
+                                channelImage = item.channelImage,
                                 streamId = item.id
                             )
                         )
                     }
-                    if (item.channelLogo != null) {
-                        userImage.visible()
+                    if (item.channelImage != null) {
+                        userImage.visibility = View.VISIBLE
                         fragment.requireContext().imageLoader.enqueue(
                             ImageRequest.Builder(fragment.requireContext()).apply {
-                                data(item.channelLogo)
-                                if (context.prefs().getBoolean(C.UI_ROUNDUSERIMAGE, true)) {
+                                data(item.channelImage)
+                                if (context.prefs().getBoolean(C.UI_ROUND_USER_IMAGE, true)) {
                                     transformations(CircleCropTransformation())
                                 }
                                 crossfade(true)
@@ -89,10 +90,10 @@ class TeamMembersAdapter(
                         )
                         userImage.setOnClickListener(channelListener)
                     } else {
-                        userImage.gone()
+                        userImage.visibility = View.GONE
                     }
                     if (item.channelName != null) {
-                        username.visible()
+                        username.visibility = View.VISIBLE
                         username.text = if (item.channelLogin != null && !item.channelLogin.equals(item.channelName, true)) {
                             when (context.prefs().getString(C.UI_NAME_DISPLAY, "0")) {
                                 "0" -> "${item.channelName}(${item.channelLogin})"
@@ -104,24 +105,25 @@ class TeamMembersAdapter(
                         }
                         username.setOnClickListener(channelListener)
                     } else {
-                        username.gone()
+                        username.visibility = View.GONE
                     }
                     if (item.viewerCount != null) {
-                        viewers.visible()
-                        viewers.text = TwitchApiHelper.formatCount(item.viewerCount ?: 0, context.prefs().getBoolean(C.UI_TRUNCATEVIEWCOUNT, true))
+                        viewers.visibility = View.VISIBLE
+                        viewers.text = TwitchApiHelper.formatCount(item.viewerCount ?: 0, context.prefs().getBoolean(C.UI_TRUNCATE_VIEW_COUNT, true))
                         root.setOnClickListener {
                             (fragment.activity as MainActivity).startStream(item)
                         }
-                        if (item.title != null && item.title != "") {
-                            title.visible()
-                            title.text = item.title?.trim()
+                        val streamTitle = item.title
+                        if (!streamTitle.isNullOrBlank()) {
+                            title.visibility = View.VISIBLE
+                            title.text = streamTitle.trim()
                         } else {
-                            title.gone()
+                            title.visibility = View.GONE
                         }
                         if (item.gameName != null) {
                             val gameListener: (View) -> Unit = {
                                 fragment.findNavController().navigate(
-                                    if (context.prefs().getBoolean(C.UI_GAMEPAGER, true)) {
+                                    if (context.prefs().getBoolean(C.UI_GAME_PAGER, true)) {
                                         GamePagerFragmentDirections.actionGlobalGamePagerFragment(
                                             gameId = item.gameId,
                                             gameSlug = item.gameSlug,
@@ -136,37 +138,33 @@ class TeamMembersAdapter(
                                     }
                                 )
                             }
-                            gameName.visible()
+                            gameName.visibility = View.VISIBLE
                             gameName.text = item.gameName
                             gameName.setOnClickListener(gameListener)
                         } else {
-                            gameName.gone()
+                            gameName.visibility = View.GONE
                         }
-                        if (item.type != null) {
-                            val text = TwitchApiHelper.getType(context, item.type)
-                            if (text != null) {
-                                type.visible()
-                                type.text = text
-                            } else {
-                                type.gone()
+                        if (context.prefs().getBoolean(C.UI_UPTIME, true) && item.createdAt != null) {
+                            val text = item.createdAt?.let {
+                                Instant.parseOrNull(it)?.takeIf { time -> time.toEpochMilliseconds() > 0 }?.let { createdAt ->
+                                    val uptime = Clock.System.now() - createdAt
+                                    if (uptime.isPositive()) {
+                                        DateUtils.formatElapsedTime(uptime.inWholeSeconds)
+                                    } else null
+                                }
                             }
-                        } else {
-                            type.gone()
-                        }
-                        if (context.prefs().getBoolean(C.UI_UPTIME, true) && item.startedAt != null) {
-                            val text = TwitchApiHelper.getUptime(startedAt = item.startedAt)
                             if (text != null) {
-                                uptime.visible()
+                                uptime.visibility = View.VISIBLE
                                 uptime.text = text
                             } else {
-                                uptime.gone()
+                                uptime.visibility = View.GONE
                             }
                         } else {
-                            uptime.gone()
+                            uptime.visibility = View.GONE
                         }
                         if (!item.tags.isNullOrEmpty() && context.prefs().getBoolean(C.UI_TAGS, true)) {
                             tagsLayout.removeAllViews()
-                            tagsLayout.visible()
+                            tagsLayout.visibility = View.VISIBLE
                             val tagsFlowLayout = Flow(context).apply {
                                 layoutParams = ConstraintLayout.LayoutParams(
                                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -193,22 +191,21 @@ class TeamMembersAdapter(
                                 text.setOnClickListener {
                                     selectTag(tag)
                                 }
-                                val padding = context.convertDpToPixels(5f)
+                                val padding = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 5f, context.resources.displayMetrics).toInt()
                                 text.setPadding(padding, 0, padding, 0)
                                 tagsLayout.addView(text)
                             }
                             tagsFlowLayout.referencedIds = ids.toIntArray()
                         } else {
-                            tagsLayout.gone()
+                            tagsLayout.visibility = View.GONE
                         }
                     } else {
-                        viewers.gone()
+                        viewers.visibility = View.GONE
                         root.setOnClickListener(channelListener)
-                        title.gone()
-                        gameName.gone()
-                        type.gone()
-                        uptime.gone()
-                        tagsLayout.gone()
+                        title.visibility = View.GONE
+                        gameName.visibility = View.GONE
+                        uptime.visibility = View.GONE
+                        tagsLayout.visibility = View.GONE
                     }
                 }
             }

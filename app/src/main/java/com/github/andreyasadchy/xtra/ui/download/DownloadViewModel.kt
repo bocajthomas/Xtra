@@ -1,127 +1,154 @@
 package com.github.andreyasadchy.xtra.ui.download
 
+import android.annotation.SuppressLint
 import android.content.Context
+import android.net.http.HttpEngine
 import android.util.Base64
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
 import androidx.lifecycle.viewModelScope
-import com.github.andreyasadchy.xtra.R
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
+import com.github.andreyasadchy.xtra.XtraApp
+import com.github.andreyasadchy.xtra.model.VideoQuality
 import com.github.andreyasadchy.xtra.repository.PlayerRepository
+import com.github.andreyasadchy.xtra.util.C
+import com.github.andreyasadchy.xtra.util.NetworkUtils
+import com.github.andreyasadchy.xtra.util.NetworkUtils.executeAsync
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
-import com.github.andreyasadchy.xtra.util.toast
-import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.chromium.net.CronetEngine
 import org.json.JSONArray
 import org.json.JSONException
-import javax.inject.Inject
+import java.util.concurrent.ExecutorService
 
-@HiltViewModel
-class DownloadViewModel @Inject constructor(
-    @param:ApplicationContext private val applicationContext: Context,
+class DownloadViewModel(
+    private val applicationContext: Context,
+    private val httpEngine: Lazy<HttpEngine?>,
+    private val cronetEngine: Lazy<CronetEngine?>,
+    private val cronetExecutor: Lazy<ExecutorService>,
+    private val okHttpClient: Lazy<OkHttpClient>,
     private val playerRepository: PlayerRepository,
 ) : ViewModel() {
 
-    val integrity = MutableStateFlow<String?>(null)
+    val integrity = MutableSharedFlow<String?>()
 
-    private val _qualities = MutableStateFlow<Map<String, Pair<String, String>>?>(null)
-    val qualities: StateFlow<Map<String, Pair<String, String>>?> = _qualities
+    private val _qualities = MutableStateFlow<List<VideoQuality>?>(null)
+    val qualities: StateFlow<List<VideoQuality>?> = _qualities
     val dismiss = MutableStateFlow(false)
     var backupQualities: List<String>? = null
     var selectedQuality: String? = null
 
-    fun setStream(networkLibrary: String?, gqlHeaders: Map<String, String>, channelLogin: String?, qualities: Map<String, Pair<String, String>>?, randomDeviceId: Boolean?, xDeviceId: String?, playerType: String?, supportedCodecs: String?, enableIntegrity: Boolean) {
+    fun setStream(networkLibrary: String?, gqlHeaders: Map<String, String>, channelLogin: String?, qualities: List<VideoQuality>?, platform: String?, playerType: String?, supportedCodecs: String?, enableIntegrity: Boolean) {
         if (_qualities.value == null) {
             if (!qualities.isNullOrEmpty()) {
                 _qualities.value = qualities
             } else {
                 viewModelScope.launch {
-                    val default = mutableMapOf("source" to "", "1080p60" to "", "1080p30" to "", "720p60" to "", "720p30" to "", "480p30" to "", "360p30" to "", "160p30" to "", "audio_only" to "")
+                    val default = listOf("source", "1080p60", "1080p30", "720p60", "720p30", "480p30", "360p30", "160p30", "audio_only")
                     try {
-                        val map = if (!channelLogin.isNullOrBlank()) {
-                            val playlist = playerRepository.loadStreamPlaylist(networkLibrary, gqlHeaders, channelLogin, randomDeviceId, xDeviceId, playerType, supportedCodecs, enableIntegrity)
+                        val list = if (!channelLogin.isNullOrBlank()) {
+                            val url = playerRepository.loadStreamPlaylistUrl(applicationContext, networkLibrary, gqlHeaders, channelLogin, platform, playerType, supportedCodecs, false, null, null, null, null, null, enableIntegrity)
+                            val playlist = withContext(Dispatchers.IO) {
+                                when {
+                                    networkLibrary == C.HTTP_ENGINE && httpEngine.value != null -> @SuppressLint("NewApi") {
+                                        val response = suspendCancellableCoroutine { continuation ->
+                                            val timeout = NetworkUtils.HttpEngineTimeout()
+                                            val request = httpEngine.value!!.newUrlRequestBuilder(
+                                                url,
+                                                cronetExecutor.value,
+                                                NetworkUtils.ByteArrayUrlCallback(continuation, timeout)
+                                            ).build()
+                                            timeout.start(request, continuation)
+                                            request.start()
+                                            continuation.invokeOnCancellation {
+                                                request.cancel()
+                                                timeout.stop()
+                                            }
+                                        }
+                                        if (response.info.httpStatusCode in 200..299) {
+                                            response.body.decodeToString()
+                                        } else null
+                                    }
+                                    networkLibrary == C.CRONET && cronetEngine.value != null -> {
+                                        val response = suspendCancellableCoroutine { continuation ->
+                                            val timeout = NetworkUtils.CronetTimeout()
+                                            val request = cronetEngine.value!!.newUrlRequestBuilder(
+                                                url,
+                                                NetworkUtils.ByteArrayCronetCallback(continuation, timeout),
+                                                cronetExecutor.value
+                                            ).build()
+                                            timeout.start(request, continuation)
+                                            request.start()
+                                            continuation.invokeOnCancellation {
+                                                request.cancel()
+                                                timeout.stop()
+                                            }
+                                        }
+                                        if (response.info.httpStatusCode in 200..299) {
+                                            response.body.decodeToString()
+                                        } else null
+                                    }
+                                    else -> {
+                                        okHttpClient.value.newCall(Request.Builder().url(url).build()).executeAsync().use { response ->
+                                            if (response.isSuccessful) {
+                                                response.body.string()
+                                            } else null
+                                        }
+                                    }
+                                }
+                            }
                             if (!playlist.isNullOrBlank()) {
-                                val names = Regex("IVS-NAME=\"(.+?)\"").findAll(playlist).mapNotNull { it.groups[1]?.value }.toMutableList()
+                                val stableVariantIds = Regex("STABLE-VARIANT-ID=\"(.+?)\"").findAll(playlist).mapNotNull { it.groups[1]?.value }.toMutableList()
+                                val resolutions = Regex("RESOLUTION=(\\d+x\\d+)").findAll(playlist).mapNotNull { it.groups[1]?.value }.toMutableList()
+                                val frameRates = Regex("FRAME-RATE=([\\d.]+)\\b").findAll(playlist).mapNotNull { it.groups[1]?.value?.toFloatOrNull() }.toMutableList()
+                                val bitrates = Regex("BANDWIDTH=(\\d+)\\b").findAll(playlist).mapNotNull { it.groups[1]?.value?.toIntOrNull() }.toMutableList()
                                 val codecs = Regex("CODECS=\"(.+?)\"").findAll(playlist).mapNotNull { it.groups[1]?.value }.toMutableList()
                                 val urls = Regex("https://.*\\.m3u8").findAll(playlist).map(MatchResult::value).toMutableList()
-                                val codecList = codecs.map { codec ->
-                                    codec.substringBefore('.').let {
-                                        when (it) {
-                                            "av01" -> "AV1"
-                                            "hev1" -> "H.265"
-                                            "avc1" -> "H.264"
-                                            else -> it
-                                        }
-                                    }
-                                }.takeUnless { it.all { it == "H.264" || it == "mp4a" } }
-                                val map = mutableMapOf<String, Pair<String, String>>()
-                                names.forEachIndexed { index, quality ->
+                                stableVariantIds.mapIndexedNotNull { index, variantId ->
                                     urls.getOrNull(index)?.let { url ->
-                                        when {
-                                            quality.equals("source", true) -> {
-                                                val quality = ContextCompat.getString(applicationContext, R.string.source)
-                                                map["source"] = Pair(codecList?.getOrNull(index)?.let { "$quality $it" } ?: quality, url)
-                                            }
-                                            quality.startsWith("audio", true) -> {
-                                                map["audio_only"] = Pair(ContextCompat.getString(applicationContext, R.string.audio_only), url)
-                                            }
-                                            else -> {
-                                                map[quality] = Pair(codecList?.getOrNull(index)?.let { "$quality $it" } ?: quality, url)
-                                            }
-                                        }
+                                        VideoQuality(variantId, resolutions.getOrNull(index)?.substringAfter('x')?.toIntOrNull(), frameRates.getOrNull(index), bitrates.getOrNull(index), codecs.getOrNull(index), url)
                                     }
                                 }
-                                map
                             } else {
-                                val map = mutableMapOf<String, Pair<String, String>>()
-                                default.entries.forEach {
-                                    when (it.key) {
-                                        "source" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.source), it.value)
-                                        "audio_only" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.audio_only), it.value)
-                                        else -> map[it.key] = Pair(it.key, it.value)
-                                    }
+                                default.map {
+                                    VideoQuality(it, url = "")
                                 }
-                                map
                             }
                         } else {
-                            val map = mutableMapOf<String, Pair<String, String>>()
-                            default.entries.forEach {
-                                when (it.key) {
-                                    "source" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.source), it.value)
-                                    "audio_only" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.audio_only), it.value)
-                                    else -> map[it.key] = Pair(it.key, it.value)
-                                }
+                            default.map {
+                                VideoQuality(it, url = "")
                             }
-                            map
                         }
-                        _qualities.value = map.toList()
-                            .sortedByDescending {
-                                it.first.substringAfter("p", "").takeWhile { it.isDigit() }.toIntOrNull()
-                            }
-                            .sortedByDescending {
-                                it.first.substringBefore("p", "").takeWhile { it.isDigit() }.toIntOrNull()
-                            }
-                            .sortedByDescending {
-                                it.first == "source"
-                            }
-                            .toMap()
-                    } catch (e: Exception) {
-                        if (e.message == "failed integrity check") {
-                            if (integrity.value == null) {
-                                integrity.value = "refresh"
-                            }
-                        } else {
-                            val map = mutableMapOf<String, Pair<String, String>>()
-                            default.forEach {
-                                when (it.key) {
-                                    "source" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.source), it.value)
-                                    "audio_only" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.audio_only), it.value)
-                                    else -> map[it.key] = Pair(it.key, it.value)
+                        _qualities.value = list
+                            .sortedByDescending { it.bitrate }
+                            .sortedByDescending { it.frameRate }
+                            .sortedByDescending { it.resolution }
+                            .toMutableList().apply {
+                                find { it.name.equals("source", true) }?.let { source ->
+                                    remove(source)
+                                    add(0, VideoQuality(VideoQuality.SOURCE_QUALITY, source.resolution, source.frameRate, source.bitrate, source.codecs, source.url))
+                                }
+                                find { it.name?.startsWith("audio", true) == true }?.let { audio ->
+                                    remove(audio)
+                                    add(VideoQuality(VideoQuality.AUDIO_ONLY_QUALITY, audio.resolution, audio.frameRate, audio.bitrate, audio.codecs, audio.url))
                                 }
                             }
-                            _qualities.value = map
+                    } catch (e: Exception) {
+                        if (e.message == C.FAILED_INTEGRITY_CHECK) {
+                            integrity.emit("stream")
+                        } else {
+                            _qualities.value = default.map {
+                                VideoQuality(it, url = "")
+                            }
                         }
                     }
                 }
@@ -129,98 +156,137 @@ class DownloadViewModel @Inject constructor(
         }
     }
 
-    fun setVideo(networkLibrary: String?, gqlHeaders: Map<String, String>, videoId: String?, animatedPreviewUrl: String?, videoType: String?, qualities: Map<String, Pair<String, String>>?, playerType: String?, supportedCodecs: String?, skipAccessToken: Int, enableIntegrity: Boolean) {
+    fun setVideo(networkLibrary: String?, gqlHeaders: Map<String, String>, videoId: String?, animatedPreviewUrl: String?, videoType: String?, qualities: List<VideoQuality>?, supportedCodecs: String?, enableIntegrity: Boolean) {
         if (_qualities.value == null) {
             if (!qualities.isNullOrEmpty()) {
                 _qualities.value = qualities
             } else {
                 viewModelScope.launch {
                     try {
-                        if (skipAccessToken <= 1 && !animatedPreviewUrl.isNullOrBlank()) {
-                            val urls = TwitchApiHelper.getVideoUrlMapFromPreview(animatedPreviewUrl, videoType, backupQualities)
-                            val map = mutableMapOf<String, Pair<String, String>>()
-                            urls.entries.forEach {
-                                when (it.key) {
-                                    "source" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.source), it.value)
-                                    "audio_only" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.audio_only), it.value)
-                                    else -> map[it.key] = Pair(it.key, it.value)
+                        val result = playerRepository.loadVideoPlaylistUrl(networkLibrary, gqlHeaders, videoId, supportedCodecs, enableIntegrity)
+                        val url = result.first
+                        backupQualities = result.second
+                        val playlist = withContext(Dispatchers.IO) {
+                            when {
+                                networkLibrary == C.HTTP_ENGINE && httpEngine.value != null -> @SuppressLint("NewApi") {
+                                    val response = suspendCancellableCoroutine { continuation ->
+                                        val timeout = NetworkUtils.HttpEngineTimeout()
+                                        val request = httpEngine.value!!.newUrlRequestBuilder(
+                                            url,
+                                            cronetExecutor.value,
+                                            NetworkUtils.ByteArrayUrlCallback(continuation, timeout)
+                                        ).build()
+                                        timeout.start(request, continuation)
+                                        request.start()
+                                        continuation.invokeOnCancellation {
+                                            request.cancel()
+                                            timeout.stop()
+                                        }
+                                    }
+                                    if (response.info.httpStatusCode in 200..299) {
+                                        response.body.decodeToString()
+                                    } else null
+                                }
+                                networkLibrary == C.CRONET && cronetEngine.value != null -> {
+                                    val response = suspendCancellableCoroutine { continuation ->
+                                        val timeout = NetworkUtils.CronetTimeout()
+                                        val request = cronetEngine.value!!.newUrlRequestBuilder(
+                                            url,
+                                            NetworkUtils.ByteArrayCronetCallback(continuation, timeout),
+                                            cronetExecutor.value
+                                        ).build()
+                                        timeout.start(request, continuation)
+                                        request.start()
+                                        continuation.invokeOnCancellation {
+                                            request.cancel()
+                                            timeout.stop()
+                                        }
+                                    }
+                                    if (response.info.httpStatusCode in 200..299) {
+                                        response.body.decodeToString()
+                                    } else null
+                                }
+                                else -> {
+                                    okHttpClient.value.newCall(Request.Builder().url(url).build()).executeAsync().use { response ->
+                                        if (response.isSuccessful) {
+                                            response.body.string()
+                                        } else null
+                                    }
                                 }
                             }
-                            map.remove("audio_only")?.let { map.put("audio_only", it) }
-                            _qualities.value = map.toList()
-                                .sortedByDescending {
-                                    it.first.substringAfter("p", "").takeWhile { it.isDigit() }.toIntOrNull()
-                                }
-                                .sortedByDescending {
-                                    it.first.substringBefore("p", "").takeWhile { it.isDigit() }.toIntOrNull()
-                                }
-                                .sortedByDescending {
-                                    it.first == "source"
-                                }
-                                .toMap()
-                        } else {
-                            val result = playerRepository.loadVideoPlaylist(networkLibrary, gqlHeaders, videoId, playerType, supportedCodecs, enableIntegrity)
-                            val playlist = result.first
-                            backupQualities = result.second
-                            if (!playlist.isNullOrBlank()) {
-                                val names = Regex("IVS-NAME=\"(.+?)\"").findAll(playlist).mapNotNull { it.groups[1]?.value }.toMutableList()
-                                val codecs = Regex("CODECS=\"(.+?)\"").findAll(playlist).mapNotNull { it.groups[1]?.value }.toMutableList()
-                                val urls = Regex("https://.*\\.m3u8").findAll(playlist).map(MatchResult::value).toMutableList()
-                                playlist.lines().filter { it.startsWith("#EXT-X-SESSION-DATA") }.let { list ->
-                                    if (list.isNotEmpty()) {
-                                        val url = urls.firstOrNull()?.takeIf { it.contains("/index-") }
-                                        val variantId = Regex("STABLE-VARIANT-ID=\"(.+?)\"").find(playlist)?.groups?.get(1)?.value
-                                        if (url != null && variantId != null) {
-                                            list.forEach { line ->
-                                                val id = Regex("DATA-ID=\"(.+?)\"").find(line)?.groups?.get(1)?.value
-                                                if (id == "com.amazon.ivs.unavailable-media") {
-                                                    val value = Regex("VALUE=\"(.+?)\"").find(line)?.groups?.get(1)?.value
-                                                    if (value != null) {
-                                                        val bytes = try {
-                                                            Base64.decode(value, Base64.DEFAULT)
-                                                        } catch (e: IllegalArgumentException) {
+                        }
+                        if (!playlist.isNullOrBlank()) {
+                            val stableVariantIds = Regex("STABLE-VARIANT-ID=\"(.+?)\"").findAll(playlist).mapNotNull { it.groups[1]?.value }.toMutableList()
+                            val resolutions = Regex("RESOLUTION=(\\d+x\\d+)").findAll(playlist).mapNotNull { it.groups[1]?.value }.toMutableList()
+                            val frameRates = Regex("FRAME-RATE=([\\d.]+)\\b").findAll(playlist).mapNotNull { it.groups[1]?.value?.toFloatOrNull() }.toMutableList()
+                            val bitrates = Regex("BANDWIDTH=(\\d+)\\b").findAll(playlist).mapNotNull { it.groups[1]?.value?.toIntOrNull() }.toMutableList()
+                            val codecs = Regex("CODECS=\"(.+?)\"").findAll(playlist).mapNotNull { it.groups[1]?.value }.toMutableList()
+                            val urls = Regex("https://.*\\.m3u8").findAll(playlist).map(MatchResult::value).toMutableList()
+                            playlist.lines().filter { it.startsWith("#EXT-X-SESSION-DATA") }.let { list ->
+                                if (list.isNotEmpty()) {
+                                    val url = urls.firstOrNull()?.takeIf { it.contains("/index-") }
+                                    val variantId = stableVariantIds.firstOrNull()
+                                    if (url != null && variantId != null) {
+                                        list.forEach { line ->
+                                            val id = Regex("DATA-ID=\"(.+?)\"").find(line)?.groups?.get(1)?.value
+                                            if (id == "com.amazon.ivs.unavailable-media") {
+                                                val value = Regex("VALUE=\"(.+?)\"").find(line)?.groups?.get(1)?.value
+                                                if (value != null) {
+                                                    val bytes = try {
+                                                        Base64.decode(value, Base64.DEFAULT)
+                                                    } catch (e: IllegalArgumentException) {
+                                                        null
+                                                    }
+                                                    if (bytes != null) {
+                                                        val string = String(bytes)
+                                                        val array = try {
+                                                            JSONArray(string)
+                                                        } catch (e: JSONException) {
                                                             null
                                                         }
-                                                        if (bytes != null) {
-                                                            val string = String(bytes)
-                                                            val array = try {
-                                                                JSONArray(string)
-                                                            } catch (e: JSONException) {
-                                                                null
-                                                            }
-                                                            if (array != null) {
-                                                                for (i in 0 until array.length()) {
-                                                                    val obj = array.optJSONObject(i)
-                                                                    if (obj != null) {
-                                                                        var skip = false
-                                                                        val filterReasons = obj.optJSONArray("FILTER_REASONS")
-                                                                        if (filterReasons != null) {
-                                                                            for (filterIndex in 0 until filterReasons.length()) {
-                                                                                val filter = filterReasons.optString(filterIndex)
-                                                                                if (filter == "FR_CODEC_NOT_REQUESTED") {
-                                                                                    skip = true
-                                                                                    break
-                                                                                }
+                                                        if (array != null) {
+                                                            for (i in 0 until array.length()) {
+                                                                val obj = array.optJSONObject(i)
+                                                                if (obj != null) {
+                                                                    var skip = false
+                                                                    val filterReasons = obj.optJSONArray("FILTER_REASONS")
+                                                                    if (filterReasons != null) {
+                                                                        for (filterIndex in 0 until filterReasons.length()) {
+                                                                            val filter = filterReasons.optString(filterIndex)
+                                                                            if (filter == "FR_CODEC_NOT_REQUESTED") {
+                                                                                skip = true
+                                                                                break
                                                                             }
                                                                         }
-                                                                        if (!skip) {
-                                                                            val name = obj.optString("IVS_NAME")
-                                                                            val codec = obj.optString("CODECS")
-                                                                            val newVariantId = obj.optString("STABLE-VARIANT-ID")
-                                                                            if (!name.isNullOrBlank() && !newVariantId.isNullOrBlank()) {
-                                                                                names.add(name)
-                                                                                if (!codec.isNullOrBlank()) {
-                                                                                    codecs.add(codec)
-                                                                                }
-                                                                                urls.add(url.replace(
-                                                                                    "$variantId/index-",
-                                                                                    if (urls.find { it.contains("chunked/index-") } == null && newVariantId != "audio_only") {
-                                                                                        "chunked/index-"
-                                                                                    } else {
-                                                                                        "$newVariantId/index-"
-                                                                                    }
-                                                                                ))
+                                                                    }
+                                                                    if (!skip) {
+                                                                        val newVariantId = obj.optString("STABLE-VARIANT-ID")
+                                                                        val resolution = obj.optString("RESOLUTION")
+                                                                        val frameRate = obj.optString("FRAME-RATE").toFloatOrNull()
+                                                                        val bitrate = obj.optInt("BANDWIDTH")
+                                                                        val codec = obj.optString("CODECS")
+                                                                        if (!newVariantId.isNullOrBlank()) {
+                                                                            stableVariantIds.add(newVariantId)
+                                                                            if (!resolution.isNullOrBlank()) {
+                                                                                resolutions.add(resolution)
                                                                             }
+                                                                            if (frameRate != null && frameRate > 0) {
+                                                                                frameRates.add(frameRate)
+                                                                            }
+                                                                            if (bitrate > 0) {
+                                                                                bitrates.add(bitrate)
+                                                                            }
+                                                                            if (!codec.isNullOrBlank()) {
+                                                                                codecs.add(codec)
+                                                                            }
+                                                                            urls.add(url.replace(
+                                                                                "$variantId/index-",
+                                                                                if (urls.find { it.contains("chunked/index-") } == null && newVariantId != "audio_only") {
+                                                                                    "chunked/index-"
+                                                                                } else {
+                                                                                    "$newVariantId/index-"
+                                                                                }
+                                                                            ))
                                                                         }
                                                                     }
                                                                 }
@@ -232,78 +298,72 @@ class DownloadViewModel @Inject constructor(
                                         }
                                     }
                                 }
-                                val codecList = codecs.map { codec ->
-                                    codec.substringBefore('.').let {
-                                        when (it) {
-                                            "av01" -> "AV1"
-                                            "hev1" -> "H.265"
-                                            "avc1" -> "H.264"
-                                            else -> it
-                                        }
+                            }
+                            val list = stableVariantIds.mapIndexedNotNull { index, variantId ->
+                                urls.getOrNull(index)?.let { url ->
+                                    VideoQuality(variantId, resolutions.getOrNull(index)?.substringAfter('x')?.toIntOrNull(), frameRates.getOrNull(index), bitrates.getOrNull(index), codecs.getOrNull(index), url)
+                                }
+                            }
+                            _qualities.value = list
+                                .sortedByDescending { it.bitrate }
+                                .sortedByDescending { it.frameRate }
+                                .sortedByDescending { it.resolution }
+                                .toMutableList().apply {
+                                    find { it.name.equals("source", true) }?.let { source ->
+                                        remove(source)
+                                        add(0, VideoQuality(VideoQuality.SOURCE_QUALITY, source.resolution, source.frameRate, source.bitrate, source.codecs, source.url))
                                     }
-                                }.takeUnless { it.all { it == "H.264" || it == "mp4a" } }
-                                val map = mutableMapOf<String, Pair<String, String>>()
-                                names.forEachIndexed { index, quality ->
-                                    urls.getOrNull(index)?.let { url ->
-                                        when {
-                                            quality.equals("source", true) -> {
-                                                val quality = ContextCompat.getString(applicationContext, R.string.source)
-                                                map["source"] = Pair(codecList?.getOrNull(index)?.let { "$quality $it" } ?: quality, url)
-                                            }
-                                            quality.startsWith("audio", true) -> {
-                                                map["audio_only"] = Pair(ContextCompat.getString(applicationContext, R.string.audio_only), url)
-                                            }
-                                            else -> {
-                                                map[quality] = Pair(codecList?.getOrNull(index)?.let { "$quality $it" } ?: quality, url)
-                                            }
-                                        }
+                                    find { it.name?.startsWith("audio", true) == true }?.let { audio ->
+                                        remove(audio)
+                                        add(VideoQuality(VideoQuality.AUDIO_ONLY_QUALITY, audio.resolution, audio.frameRate, audio.bitrate, audio.codecs, audio.url))
                                     }
                                 }
-                                _qualities.value = map.toList()
-                                    .sortedByDescending {
-                                        it.first.substringAfter("p", "").takeWhile { it.isDigit() }.toIntOrNull()
+                        } else {
+                            if (!animatedPreviewUrl.isNullOrBlank()) {
+                                val list = (backupQualities ?: TwitchApiHelper.defaultQualityList).map { quality ->
+                                    val split = quality.split("p")
+                                    val resolution = split.getOrNull(0)?.takeWhile { it.isDigit() }?.toIntOrNull()
+                                    val frameRate = split.getOrNull(1)?.takeWhile { it.isDigit() }?.toIntOrNull() ?: 30
+                                    val url = animatedPreviewUrl
+                                        .replace("storyboards", quality)
+                                        .replaceAfterLast(
+                                            "/",
+                                            if (videoType?.lowercase() == "highlight") {
+                                                "highlight-${animatedPreviewUrl.substringAfterLast("/").substringBefore("-")}.m3u8"
+                                            } else {
+                                                "index-dvr.m3u8"
+                                            }
+                                        )
+                                    val name = if (quality == "chunked") {
+                                        "source"
+                                    } else {
+                                        quality
                                     }
-                                    .sortedByDescending {
-                                        it.first.substringBefore("p", "").takeWhile { it.isDigit() }.toIntOrNull()
+                                    VideoQuality(name, resolution, frameRate.toFloat(), url = url)
+                                }
+                                _qualities.value = list
+                                    .sortedByDescending { it.bitrate }
+                                    .sortedByDescending { it.frameRate }
+                                    .sortedByDescending { it.resolution }
+                                    .toMutableList().apply {
+                                        find { it.name.equals("source", true) }?.let { source ->
+                                            remove(source)
+                                            add(0, VideoQuality(VideoQuality.SOURCE_QUALITY, source.resolution, source.frameRate, source.bitrate, source.codecs, source.url))
+                                        }
+                                        find { it.name?.startsWith("audio", true) == true }?.let { audio ->
+                                            remove(audio)
+                                            add(VideoQuality(VideoQuality.AUDIO_ONLY_QUALITY, audio.resolution, audio.frameRate, audio.bitrate, audio.codecs, audio.url))
+                                        }
                                     }
-                                    .sortedByDescending {
-                                        it.first == "source"
-                                    }
-                                    .toMap()
                             } else {
-                                if (skipAccessToken == 2 && !animatedPreviewUrl.isNullOrBlank()) {
-                                    val urls = TwitchApiHelper.getVideoUrlMapFromPreview(animatedPreviewUrl, videoType, backupQualities)
-                                    val map = mutableMapOf<String, Pair<String, String>>()
-                                    urls.entries.forEach {
-                                        when (it.key) {
-                                            "source" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.source), it.value)
-                                            "audio_only" -> map[it.key] = Pair(ContextCompat.getString(applicationContext, R.string.audio_only), it.value)
-                                            else -> map[it.key] = Pair(it.key, it.value)
-                                        }
-                                    }
-                                    map.remove("audio_only")?.let { map.put("audio_only", it) }
-                                    _qualities.value = map.toList()
-                                        .sortedByDescending {
-                                            it.first.substringAfter("p", "").takeWhile { it.isDigit() }.toIntOrNull()
-                                        }
-                                        .sortedByDescending {
-                                            it.first.substringBefore("p", "").takeWhile { it.isDigit() }.toIntOrNull()
-                                        }
-                                        .sortedByDescending {
-                                            it.first == "source"
-                                        }
-                                        .toMap()
-                                } else {
-                                    throw IllegalAccessException()
-                                }
+                                throw IllegalAccessException()
                             }
                         }
                     } catch (e: Exception) {
-                        if (e.message == "failed integrity check" && integrity.value == null) {
-                            integrity.value = "refresh"
+                        if (e.message == C.FAILED_INTEGRITY_CHECK) {
+                            integrity.emit("video")
                         }
                         if (e is IllegalAccessException) {
-                            applicationContext.toast(ContextCompat.getString(applicationContext, R.string.video_subscribers_only))
                             dismiss.value = true
                         }
                     }
@@ -312,64 +372,36 @@ class DownloadViewModel @Inject constructor(
         }
     }
 
-    fun setClip(networkLibrary: String?, gqlHeaders: Map<String, String>, clipId: String?, qualities: Map<String, Pair<String, String>>?, enableIntegrity: Boolean) {
+    fun setClip(networkLibrary: String?, gqlHeaders: Map<String, String>, clipId: String?, qualities: List<VideoQuality>?, enableIntegrity: Boolean) {
         if (_qualities.value == null) {
             if (!qualities.isNullOrEmpty()) {
                 _qualities.value = qualities
             } else {
                 viewModelScope.launch {
                     try {
-                        val urls = playerRepository.loadClipUrls(networkLibrary, gqlHeaders, clipId, enableIntegrity)
-                        val hideCodecs = urls?.all {
-                            it.key.second?.substringBefore('.').let { codec ->
-                                codec == "avc1" || codec == "mp4a" || codec.isNullOrBlank()
-                            }
-                        } == true
-                        val map = mutableMapOf<String, Pair<String, String>>()
-                        urls?.entries?.forEach {
-                            val quality = it.key.first.let { quality ->
-                                if (quality == "audio_only") {
-                                    ContextCompat.getString(applicationContext, R.string.audio_only)
-                                } else {
-                                    val quality = if (quality == "source") {
-                                        ContextCompat.getString(applicationContext, R.string.source)
-                                    } else {
-                                        quality
-                                    }
-                                    if (hideCodecs) {
-                                        quality
-                                    } else {
-                                        val codec = it.key.second?.substringBefore('.').let { codec ->
-                                            when {
-                                                codec == "av01" -> "AV1"
-                                                codec == "hev1" || codec == "hvc1" -> "H.265"
-                                                codec == "avc1" || codec.isNullOrBlank() -> "H.264"
-                                                else -> it
-                                            }
-                                        }
-                                        "$quality $codec"
-                                    }
-                                }
-                            }
-                            map[it.key.first] = Pair(quality, it.value)
+                        val list = playerRepository.loadClipQualities(networkLibrary, gqlHeaders, clipId, enableIntegrity)
+                        if (list != null) {
+                            _qualities.value = list
+                                .sortedByDescending { it.bitrate }
+                                .sortedByDescending { it.frameRate }
+                                .sortedByDescending { it.resolution }
                         }
-                        _qualities.value = map.toList()
-                            .sortedByDescending {
-                                it.first.substringAfter("p", "").takeWhile { it.isDigit() }.toIntOrNull()
-                            }
-                            .sortedByDescending {
-                                it.first.substringBefore("p", "").takeWhile { it.isDigit() }.toIntOrNull()
-                            }
-                            .sortedByDescending {
-                                it.first == "source"
-                            }
-                            .toMap()
                     } catch (e: Exception) {
-                        if (e.message == "failed integrity check" && integrity.value == null) {
-                            integrity.value = "refresh"
+                        if (e.message == C.FAILED_INTEGRITY_CHECK) {
+                            integrity.emit("clip")
                         }
                     }
                 }
+            }
+        }
+    }
+
+    companion object {
+        val DownloadViewModelFactory = viewModelFactory {
+            initializer {
+                val application = (this[APPLICATION_KEY] as XtraApp)
+                val xtraModule = application.xtraModule
+                DownloadViewModel(application.applicationContext, xtraModule.httpEngine, xtraModule.cronetEngine, xtraModule.cronetExecutor, xtraModule.okHttpClient, xtraModule.playerRepository)
             }
         }
     }

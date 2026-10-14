@@ -8,49 +8,30 @@ import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
-import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.github.andreyasadchy.xtra.R
-import com.github.andreyasadchy.xtra.repository.GraphQLRepository
-import com.github.andreyasadchy.xtra.repository.HelixRepository
-import com.github.andreyasadchy.xtra.repository.NotificationUsersRepository
-import com.github.andreyasadchy.xtra.repository.ShownNotificationsRepository
+import com.github.andreyasadchy.xtra.XtraApp
+import com.github.andreyasadchy.xtra.XtraModule
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
 import com.github.andreyasadchy.xtra.util.prefs
-import dagger.assisted.Assisted
-import dagger.assisted.AssistedInject
-import javax.inject.Inject
 
-@HiltWorker
-class LiveNotificationWorker @AssistedInject constructor(
-    @Assisted private val context: Context,
-    @Assisted parameters: WorkerParameters,
+class LiveNotificationWorker(
+    private val context: Context,
+    parameters: WorkerParameters,
 ) : CoroutineWorker(context, parameters) {
 
-    @Inject
-    lateinit var shownNotifications: ShownNotificationsRepository
-
-    @Inject
-    lateinit var notificationUsersRepository: NotificationUsersRepository
-
-    @Inject
-    lateinit var graphQLRepository: GraphQLRepository
-
-    @Inject
-    lateinit var helixRepository: HelixRepository
+    lateinit var xtraModule: XtraModule
 
     private val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
     override suspend fun doWork(): Result {
-        val streams = shownNotifications.getNewStreams(
-            notificationUsersRepository = notificationUsersRepository,
-            networkLibrary = context.prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+        xtraModule = (context as XtraApp).xtraModule
+        val streams = xtraModule.notificationsRepository.getNewStreams(
+            networkLibrary = context.prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
             gqlHeaders = TwitchApiHelper.getGQLHeaders(context, true),
-            graphQLRepository = graphQLRepository,
             helixHeaders = TwitchApiHelper.getHelixHeaders(context),
-            helixRepository = helixRepository
         )
         if (streams.isNotEmpty()) {
             val channelId = context.getString(R.string.notification_live_channel_id)

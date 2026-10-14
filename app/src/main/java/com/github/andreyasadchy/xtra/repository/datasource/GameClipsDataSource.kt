@@ -2,11 +2,11 @@ package com.github.andreyasadchy.xtra.repository.datasource
 
 import androidx.paging.PagingSource
 import androidx.paging.PagingState
+import com.github.andreyasadchy.xtra.graphql.type.ClipsPeriod
+import com.github.andreyasadchy.xtra.graphql.type.Language
 import com.github.andreyasadchy.xtra.model.ui.Clip
 import com.github.andreyasadchy.xtra.repository.GraphQLRepository
 import com.github.andreyasadchy.xtra.repository.HelixRepository
-import com.github.andreyasadchy.xtra.type.ClipsPeriod
-import com.github.andreyasadchy.xtra.type.Language
 import com.github.andreyasadchy.xtra.util.C
 import kotlin.math.max
 
@@ -25,7 +25,6 @@ class GameClipsDataSource(
     private val helixHeaders: Map<String, String>,
     private val helixRepository: HelixRepository,
     private val enableIntegrity: Boolean,
-    private val apiPref: List<String>,
     private val networkLibrary: String?,
 ) : PagingSource<Int, Clip>() {
     private var api: String? = null
@@ -34,19 +33,22 @@ class GameClipsDataSource(
     override suspend fun load(params: LoadParams<Int>): LoadResult<Int, Clip> {
         return if (!offset.isNullOrBlank()) {
             try {
-                loadFromApi(api, params)
+                loadFromApi(params)
             } catch (e: Exception) {
                 LoadResult.Error(e)
             }
         } else {
             try {
-                loadFromApi(apiPref.getOrNull(0), params)
+                api = C.GQL
+                loadFromApi(params)
             } catch (e: Exception) {
                 try {
-                    loadFromApi(apiPref.getOrNull(1), params)
+                    api = C.HELIX
+                    loadFromApi(params)
                 } catch (e: Exception) {
                     try {
-                        loadFromApi(apiPref.getOrNull(2), params)
+                        api = C.GQL_PERSISTED_QUERY
+                        loadFromApi(params)
                     } catch (e: Exception) {
                         LoadResult.Error(e)
                     }
@@ -55,9 +57,8 @@ class GameClipsDataSource(
         }
     }
 
-    private suspend fun loadFromApi(apiPref: String?, params: LoadParams<Int>): LoadResult<Int, Clip> {
-        api = apiPref
-        return when (apiPref) {
+    private suspend fun loadFromApi(params: LoadParams<Int>): LoadResult<Int, Clip> {
+        return when (api) {
             C.GQL -> gqlQueryLoad(params)
             C.GQL_PERSISTED_QUERY -> gqlLoad(params)
             C.HELIX -> if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank() && gqlQueryLanguages.isNullOrEmpty() && gqlLanguages.isNullOrEmpty()) helixLoad(params) else throw Exception()
@@ -78,7 +79,7 @@ class GameClipsDataSource(
             after = offset
         )
         if (enableIntegrity) {
-            response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
+            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
         }
         val data = response.data!!.game!!.clips!!
         val items = data.edges!!
@@ -89,22 +90,23 @@ class GameClipsDataSource(
                     channelId = it.broadcaster?.id,
                     channelLogin = it.broadcaster?.login,
                     channelName = it.broadcaster?.displayName,
-                    videoId = it.video?.id,
-                    vodOffset = if (it.videoOffsetSeconds != null && it.durationSeconds != null) {
-                        max(it.videoOffsetSeconds - it.durationSeconds, 0)
-                    } else {
-                        it.videoOffsetSeconds
-                    },
+                    channelImageURL = it.broadcaster?.profileImageURL,
                     gameId = gameId,
                     gameSlug = gameSlug,
                     gameName = gameName,
                     title = it.title,
+                    thumbnailURL = it.thumbnailURL,
+                    createdAt = it.createdAt?.toString(),
                     viewCount = it.viewCount,
-                    uploadDate = it.createdAt?.toString(),
-                    duration = it.durationSeconds?.toDouble(),
-                    thumbnailUrl = it.thumbnailURL,
-                    profileImageUrl = it.broadcaster?.profileImageURL,
-                    videoAnimatedPreviewURL = it.video?.animatedPreviewURL
+                    durationSeconds = it.durationSeconds,
+                    videoId = it.video?.id,
+                    videoOffsetSeconds = if (it.videoOffsetSeconds != null && it.durationSeconds != null) {
+                        max(it.videoOffsetSeconds - it.durationSeconds, 0)
+                    } else {
+                        it.videoOffsetSeconds
+                    },
+                    videoCreatedAt = it.video?.createdAt?.toString(),
+                    videoAnimatedPreviewURL = it.video?.animatedPreviewURL,
                 )
             }
         }
@@ -122,7 +124,7 @@ class GameClipsDataSource(
     private suspend fun gqlLoad(params: LoadParams<Int>): LoadResult<Int, Clip> {
         val response = graphQLRepository.loadGameClips(networkLibrary, gqlHeaders, gameSlug, gqlPeriod, gqlLanguages, params.loadSize, offset)
         if (enableIntegrity) {
-            response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
+            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
         }
         val data = response.data!!.game.clips
         val items = data.edges
@@ -133,15 +135,15 @@ class GameClipsDataSource(
                     channelId = it.broadcaster?.id,
                     channelLogin = it.broadcaster?.login,
                     channelName = it.broadcaster?.displayName,
+                    channelImageURL = it.broadcaster?.profileImageURL,
                     gameId = gameId,
                     gameSlug = gameSlug,
                     gameName = gameName,
                     title = it.title,
+                    thumbnailURL = it.thumbnailURL,
+                    createdAt = it.createdAt,
                     viewCount = it.viewCount,
-                    uploadDate = it.createdAt,
-                    duration = it.durationSeconds,
-                    thumbnailUrl = it.thumbnailURL,
-                    profileImageUrl = it.broadcaster?.profileImageURL,
+                    durationSeconds = it.durationSeconds,
                 )
             }
         }
@@ -175,28 +177,28 @@ class GameClipsDataSource(
         }
         val list = response.data.map {
             val user = it.channelId?.let { id ->
-                users.find { user -> user.channelId == id }
+                users.find { user -> user.id == id }
             }
             Clip(
                 id = it.id,
                 channelId = it.channelId,
-                channelLogin = user?.channelLogin,
+                channelLogin = user?.login,
                 channelName = it.channelName,
-                videoId = it.videoId,
-                vodOffset = if (it.vodOffset != null && it.duration != null) {
-                    max(it.vodOffset - it.duration.toInt(), 0)
-                } else {
-                    it.vodOffset
-                },
+                channelImageURL = user?.profileImageURL,
                 gameId = gameId,
                 gameSlug = gameSlug,
                 gameName = gameName,
                 title = it.title,
+                thumbnailURL = it.thumbnailURL,
+                createdAt = it.createdAt,
                 viewCount = it.viewCount,
-                uploadDate = it.createdAt,
-                duration = it.duration,
-                thumbnailUrl = it.thumbnailUrl,
-                profileImageUrl = user?.profileImageUrl,
+                durationSeconds = it.duration?.toInt(),
+                videoId = it.videoId,
+                videoOffsetSeconds = if (it.vodOffset != null && it.duration != null) {
+                    max(it.vodOffset - it.duration.toInt(), 0)
+                } else {
+                    it.vodOffset
+                },
             )
         }
         offset = response.pagination?.cursor

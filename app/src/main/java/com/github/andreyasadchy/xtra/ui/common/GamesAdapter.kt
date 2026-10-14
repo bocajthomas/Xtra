@@ -1,5 +1,6 @@
 package com.github.andreyasadchy.xtra.ui.common
 
+import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -25,10 +26,7 @@ import com.github.andreyasadchy.xtra.ui.game.GameMediaFragmentDirections
 import com.github.andreyasadchy.xtra.ui.game.GamePagerFragmentDirections
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
-import com.github.andreyasadchy.xtra.util.convertDpToPixels
-import com.github.andreyasadchy.xtra.util.gone
 import com.github.andreyasadchy.xtra.util.prefs
-import com.github.andreyasadchy.xtra.util.visible
 
 class GamesAdapter(
     private val fragment: Fragment,
@@ -36,10 +34,10 @@ class GamesAdapter(
 ) : PagingDataAdapter<Game, GamesAdapter.PagingViewHolder>(
     object : DiffUtil.ItemCallback<Game>() {
         override fun areItemsTheSame(oldItem: Game, newItem: Game): Boolean =
-            oldItem.gameId == newItem.gameId
+            oldItem.id == newItem.id
 
         override fun areContentsTheSame(oldItem: Game, newItem: Game): Boolean =
-            oldItem.viewersCount == newItem.viewersCount
+            oldItem.viewerCount == newItem.viewerCount
     }) {
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PagingViewHolder {
@@ -61,23 +59,25 @@ class GamesAdapter(
                     val context = fragment.requireContext()
                     root.setOnClickListener {
                         fragment.findNavController().navigate(
-                            if (context.prefs().getBoolean(C.UI_GAMEPAGER, true)) {
+                            if (context.prefs().getBoolean(C.UI_GAME_PAGER, true)) {
                                 GamePagerFragmentDirections.actionGlobalGamePagerFragment(
-                                    gameId = item.gameId,
-                                    gameSlug = item.gameSlug,
-                                    gameName = item.gameName
+                                    gameId = item.id,
+                                    gameSlug = item.slug,
+                                    gameName = item.name,
+                                    boxArt = item.boxArt
                                 )
                             } else {
                                 GameMediaFragmentDirections.actionGlobalGameMediaFragment(
-                                    gameId = item.gameId,
-                                    gameSlug = item.gameSlug,
-                                    gameName = item.gameName
+                                    gameId = item.id,
+                                    gameSlug = item.slug,
+                                    gameName = item.name,
+                                    boxArt = item.boxArt
                                 )
                             }
                         )
                     }
                     if (item.boxArt != null) {
-                        gameImage.visible()
+                        gameImage.visibility = View.VISIBLE
                         fragment.requireContext().imageLoader.enqueue(
                             ImageRequest.Builder(fragment.requireContext()).apply {
                                 data(item.boxArt)
@@ -86,39 +86,39 @@ class GamesAdapter(
                             }.build()
                         )
                     } else {
-                        gameImage.gone()
+                        gameImage.visibility = View.GONE
                     }
-                    if (item.gameName != null) {
-                        gameName.visible()
-                        gameName.text = item.gameName
+                    if (item.name != null) {
+                        gameName.visibility = View.VISIBLE
+                        gameName.text = item.name
                     } else {
-                        gameName.gone()
+                        gameName.visibility = View.GONE
                     }
-                    if (item.viewersCount != null) {
-                        viewers.visible()
-                        val count = item.viewersCount ?: 0
+                    if (item.viewerCount != null) {
+                        viewers.visibility = View.VISIBLE
+                        val count = item.viewerCount ?: 0
                         viewers.text = context.resources.getQuantityString(
                             R.plurals.viewers,
                             count,
-                            TwitchApiHelper.formatCount(count, context.prefs().getBoolean(C.UI_TRUNCATEVIEWCOUNT, true))
+                            TwitchApiHelper.formatCount(count, context.prefs().getBoolean(C.UI_TRUNCATE_VIEW_COUNT, true))
                         )
                     } else {
-                        viewers.gone()
+                        viewers.visibility = View.GONE
                     }
-                    if (item.broadcastersCount != null && context.prefs().getBoolean(C.UI_BROADCASTERSCOUNT, true)) {
-                        broadcastersCount.visible()
-                        val count = item.broadcastersCount ?: 0
+                    if (item.broadcasterCount != null && context.prefs().getBoolean(C.UI_BROADCASTERS_COUNT, true)) {
+                        broadcastersCount.visibility = View.VISIBLE
+                        val count = item.broadcasterCount ?: 0
                         broadcastersCount.text = context.resources.getQuantityString(
                             R.plurals.broadcasters,
                             count,
-                            TwitchApiHelper.formatCount(count, context.prefs().getBoolean(C.UI_TRUNCATEVIEWCOUNT, true))
+                            TwitchApiHelper.formatCount(count, context.prefs().getBoolean(C.UI_TRUNCATE_VIEW_COUNT, true))
                         )
                     } else {
-                        broadcastersCount.gone()
+                        broadcastersCount.visibility = View.GONE
                     }
                     if (!item.tags.isNullOrEmpty() && context.prefs().getBoolean(C.UI_TAGS, true)) {
                         tagsLayout.removeAllViews()
-                        tagsLayout.visible()
+                        tagsLayout.visibility = View.VISIBLE
                         val tagsFlowLayout = Flow(context).apply {
                             layoutParams = ConstraintLayout.LayoutParams(
                                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -147,13 +147,13 @@ class GamesAdapter(
                                     selectTag(tag)
                                 }
                             }
-                            val padding = context.convertDpToPixels(5f)
+                            val padding = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 5f, context.resources.displayMetrics).toInt()
                             text.setPadding(padding, 0, padding, 0)
                             tagsLayout.addView(text)
                         }
                         tagsFlowLayout.referencedIds = ids.toIntArray()
                     } else {
-                        tagsLayout.gone()
+                        tagsLayout.visibility = View.GONE
                     }
                 }
             }

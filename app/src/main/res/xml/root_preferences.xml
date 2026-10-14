@@ -83,23 +83,27 @@
         app:singleLineTitle="false" />
 
     <SwitchPreferenceCompat
-        android:defaultValue="false"
-        android:key="player_stream_proxy"
-        android:summary="@string/use_custom_proxy_desc"
-        android:title="@string/use_custom_proxy"
-        app:iconSpaceReserved="false"
-        app:singleLineTitle="false" />
-
-    <EditTextPreference
-        android:defaultValue="https://api.ttv.lol/playlist/$channel.m3u8?allow_source=true&amp;allow_audio_only=true&amp;fast_bread=true"
-        android:key="player_proxy_url"
-        android:summary="@string/stream_proxy_url_desc"
-        android:title="@string/stream_proxy_url"
+        android:defaultValue="true"
+        android:key="player_use_custom_proxy"
+        android:title="@string/use_custom_proxies"
         app:iconSpaceReserved="false"
         app:singleLineTitle="false" />
 
     <Preference
-        android:key="proxy_settings"
+        android:key="custom_proxy_settings"
+        android:title="@string/custom_proxy_settings"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <SwitchPreferenceCompat
+        android:defaultValue="false"
+        android:key="player_use_stream_proxy"
+        android:title="@string/use_stream_proxies"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <Preference
+        android:key="stream_proxy_settings"
         android:title="@string/proxy_settings"
         app:iconSpaceReserved="false"
         app:singleLineTitle="false" />
@@ -113,6 +117,16 @@
     <Preference
         android:key="api_token_settings"
         android:title="@string/api_token_settings"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <ListPreference
+        android:defaultValue="OkHttp"
+        android:entries="@array/networkLibraryEntries"
+        android:entryValues="@array/networkLibraryEntries"
+        android:key="network_library"
+        android:summary="%s"
+        android:title="@string/network_library"
         app:iconSpaceReserved="false"
         app:singleLineTitle="false" />
 

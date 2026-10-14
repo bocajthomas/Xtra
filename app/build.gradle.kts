@@ -1,10 +1,8 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin)
     alias(libs.plugins.kotlin.parcelize)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
-    alias(libs.plugins.hilt)
     alias(libs.plugins.navigation.safeargs)
     alias(libs.plugins.apollo)
 }
@@ -23,14 +21,14 @@ android {
         }
     }
     namespace = "com.github.andreyasadchy.xtra"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.github.andreyasadchy.xtra"
         minSdk = 23
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 121
-        versionName = "2.52.1"
+        versionName = "2.60.5"
     }
 
     buildTypes {
@@ -67,6 +65,7 @@ android {
 }
 
 dependencies {
+    compileOnly("com.google.j2objc:j2objc-annotations:3.0.0") // OkHttpDataSource SettableFuture
     implementation("com.google.android.gms:play-services-cronet:18.1.0")
     implementation("com.google.mlkit:language-id:17.0.6")
     implementation("com.google.mlkit:translate:17.0.3")
@@ -79,8 +78,9 @@ dependencies {
     implementation(libs.appcompat)
     implementation(libs.constraintlayout)
     implementation(libs.coordinatorlayout)
-    implementation(libs.core.ktx)
-    implementation(libs.fragment.ktx)
+    implementation(libs.core)
+    implementation(libs.fragment)
+    implementation(libs.lifecycle.service)
     implementation(libs.lifecycle.viewmodel)
     implementation(libs.navigation.fragment)
     implementation(libs.navigation.ui)
@@ -116,21 +116,13 @@ dependencies {
     implementation(libs.glide.okhttp)
     implementation(libs.glide.webpdecoder)
 
-    implementation(libs.hilt)
-    ksp(libs.hilt.compiler)
-    implementation(libs.hilt.work)
-    ksp(libs.hilt.extension.compiler)
-
     implementation(libs.coroutines)
 }
 
-ksp {
-    arg("room.schemaLocation", "$projectDir/schemas")
-}
-
 apollo {
+    @Suppress("ApolloEndpointNotConfigured")
     service("service") {
-        packageName.set("com.github.andreyasadchy.xtra")
+        packageName.set("com.github.andreyasadchy.xtra.graphql")
     }
 }
 

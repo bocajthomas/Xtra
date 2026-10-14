@@ -2,30 +2,32 @@ package com.github.andreyasadchy.xtra.ui.settings
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.admin.DeviceAdminReceiver
 import android.app.admin.DevicePolicyManager
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.ext.SdkExtensions
 import android.provider.Settings
+import android.text.InputType
+import android.text.format.Formatter
+import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageButton
-import android.widget.LinearLayout
-import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.appcompat.widget.SearchView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.edit
-import androidx.core.content.res.use
 import androidx.core.net.toUri
 import androidx.core.os.LocaleListCompat
 import androidx.core.view.ViewCompat
@@ -33,8 +35,6 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updateLayoutParams
 import androidx.core.view.updatePadding
-import androidx.core.widget.NestedScrollView
-import androidx.core.widget.TextViewCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.Lifecycle
@@ -59,27 +59,22 @@ import androidx.recyclerview.widget.RecyclerView
 import com.github.andreyasadchy.xtra.R
 import com.github.andreyasadchy.xtra.SettingsNavGraphDirections
 import com.github.andreyasadchy.xtra.databinding.ActivitySettingsBinding
+import com.github.andreyasadchy.xtra.databinding.DialogUpdateDownloadBinding
 import com.github.andreyasadchy.xtra.model.ui.SettingsDragListItem
 import com.github.andreyasadchy.xtra.model.ui.SettingsSearchItem
 import com.github.andreyasadchy.xtra.ui.common.IntegrityDialog
-import com.github.andreyasadchy.xtra.util.AdminReceiver
+import com.github.andreyasadchy.xtra.ui.settings.SettingsViewModel.Companion.SettingsViewModelFactory
 import com.github.andreyasadchy.xtra.util.C
-import com.github.andreyasadchy.xtra.util.DisplayUtils
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
 import com.github.andreyasadchy.xtra.util.applyTheme
-import com.github.andreyasadchy.xtra.util.convertDpToPixels
 import com.github.andreyasadchy.xtra.util.getAlertDialogBuilder
-import com.github.andreyasadchy.xtra.util.gone
 import com.github.andreyasadchy.xtra.util.prefs
-import com.github.andreyasadchy.xtra.util.toast
 import com.github.andreyasadchy.xtra.util.tokenPrefs
-import com.github.andreyasadchy.xtra.util.visible
 import com.google.android.material.appbar.AppBarLayout
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.common.model.RemoteModelManager
 import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.TranslateRemoteModel
-import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -87,8 +82,8 @@ import kotlinx.coroutines.launch
 import org.chromium.net.CronetProvider
 import java.util.Collections
 import java.util.Locale
+import kotlin.time.Duration.Companion.milliseconds
 
-@AndroidEntryPoint
 class SettingsActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivitySettingsBinding
@@ -151,7 +146,7 @@ class SettingsActivity : AppCompatActivity() {
                 job?.cancel()
                 if (newText.isNotEmpty()) {
                     job = lifecycleScope.launch {
-                        delay(750)
+                        delay(750.milliseconds)
                         withResumed {
                             (supportFragmentManager.findFragmentById(R.id.navHostFragment)?.childFragmentManager?.fragments?.getOrNull(0) as? SettingsSearchFragment)?.search(newText)
                         }
@@ -185,7 +180,7 @@ class SettingsActivity : AppCompatActivity() {
         val recyclerView = RecyclerView(this).apply {
             layoutManager = LinearLayoutManager(this@SettingsActivity)
             adapter = listAdapter
-            val padding = convertDpToPixels(10f)
+            val padding = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 10F, resources.displayMetrics).toInt()
             setPadding(0, padding, 0, 0)
         }
         listAdapter.setDefault = { item ->
@@ -221,11 +216,11 @@ class SettingsActivity : AppCompatActivity() {
         with(binding) {
             if (showSearch) {
                 toolbar.menu.findItem(R.id.search).isVisible = false
-                searchView.visible()
+                searchView.visibility = View.VISIBLE
             } else {
                 toolbar.menu.findItem(R.id.search).isVisible = true
                 searchView.setQuery(null, false)
-                searchView.gone()
+                searchView.visibility = View.GONE
             }
         }
     }
@@ -254,9 +249,11 @@ class SettingsActivity : AppCompatActivity() {
 
     class SettingsFragment : MaterialPreferenceFragment() {
 
-        private val viewModel: SettingsViewModel by activityViewModels()
+        private val viewModel: SettingsViewModel by activityViewModels { SettingsViewModelFactory }
         private var backupResultLauncher: ActivityResultLauncher<Intent>? = null
         private var restoreResultLauncher: ActivityResultLauncher<Intent>? = null
+        private var updateDownloadDialogBinding: DialogUpdateDownloadBinding? = null
+        private var updateDownloadDialog: AlertDialog? = null
 
         override fun onCreate(savedInstanceState: Bundle?) {
             super.onCreate(savedInstanceState)
@@ -282,7 +279,7 @@ class SettingsActivity : AppCompatActivity() {
                     }
                     viewModel.restoreSettings(
                         list = list,
-                        networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+                        networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
                         gqlHeaders = TwitchApiHelper.getGQLHeaders(requireContext(), true),
                         helixHeaders = TwitchApiHelper.getHelixHeaders(requireContext())
                     )
@@ -348,7 +345,7 @@ class SettingsActivity : AppCompatActivity() {
                 }
                 viewModel.toggleNotifications(
                     enabled = newValue as Boolean,
-                    networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+                    networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
                     gqlHeaders = TwitchApiHelper.getGQLHeaders(requireContext(), true),
                     helixHeaders = TwitchApiHelper.getHelixHeaders(requireContext())
                 )
@@ -387,9 +384,14 @@ class SettingsActivity : AppCompatActivity() {
                 findNavController().navigate(SettingsNavGraphDirections.actionGlobalBufferSettingsFragment())
                 true
             }
-            findPreference<Preference>("proxy_settings")?.setOnPreferenceClickListener {
+            findPreference<Preference>("custom_proxy_settings")?.setOnPreferenceClickListener {
                 requireActivity().findViewById<AppBarLayout>(R.id.appBar)?.setExpanded(true)
-                findNavController().navigate(SettingsNavGraphDirections.actionGlobalProxySettingsFragment())
+                findNavController().navigate(SettingsNavGraphDirections.actionGlobalCustomProxySettingsFragment())
+                true
+            }
+            findPreference<Preference>("stream_proxy_settings")?.setOnPreferenceClickListener {
+                requireActivity().findViewById<AppBarLayout>(R.id.appBar)?.setExpanded(true)
+                findNavController().navigate(SettingsNavGraphDirections.actionGlobalStreamProxySettingsFragment())
                 true
             }
             findPreference<Preference>("playback_settings")?.setOnPreferenceClickListener {
@@ -402,6 +404,25 @@ class SettingsActivity : AppCompatActivity() {
                 findNavController().navigate(SettingsNavGraphDirections.actionGlobalApiTokenSettingsFragment())
                 true
             }
+            val httpEngine = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S) >= 7
+            val cronet = CronetProvider.getAllProviders(requireContext()).any { it.isEnabled }
+            if (!httpEngine || !cronet) {
+                findPreference<ListPreference>(C.NETWORK_LIBRARY)?.apply {
+                    when {
+                        !httpEngine && !cronet -> {
+                            isVisible = false
+                        }
+                        !cronet -> {
+                            setEntries(R.array.networkLibraryEntriesNoCronet)
+                            setEntryValues(R.array.networkLibraryEntriesNoCronet)
+                        }
+                        else -> {
+                            setEntries(R.array.networkLibraryEntriesNoHttpEngine)
+                            setEntryValues(R.array.networkLibraryEntriesNoHttpEngine)
+                        }
+                    }
+                }
+            }
             findPreference<Preference>("download_settings")?.setOnPreferenceClickListener {
                 requireActivity().findViewById<AppBarLayout>(R.id.appBar)?.setExpanded(true)
                 findNavController().navigate(SettingsNavGraphDirections.actionGlobalDownloadSettingsFragment())
@@ -409,7 +430,7 @@ class SettingsActivity : AppCompatActivity() {
             }
             findPreference<Preference>("check_updates")?.setOnPreferenceClickListener {
                 viewModel.checkUpdates(
-                    requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+                    requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
                     requireContext().prefs().getString(C.UPDATE_URL, null) ?: "https://api.github.com/repos/crackededed/xtra/releases/tags/latest",
                     requireContext().tokenPrefs().getLong(C.UPDATE_LAST_CHECKED, 0)
                 )
@@ -477,7 +498,7 @@ class SettingsActivity : AppCompatActivity() {
                                 try {
                                     val intent = Intent(
                                         Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                                        Uri.parse("package:${requireContext().packageName}")
+                                        "package:${requireContext().packageName}".toUri()
                                     )
                                     startActivity(intent)
                                 } catch (e: ActivityNotFoundException) {
@@ -493,22 +514,69 @@ class SettingsActivity : AppCompatActivity() {
                                             val intent = Intent(Intent.ACTION_VIEW, it.toUri()).apply {
                                                 addCategory(Intent.CATEGORY_BROWSABLE)
                                             }
-                                            requireContext().startActivity(intent)
+                                            startActivity(intent)
                                             requireContext().tokenPrefs().edit {
                                                 putLong(C.UPDATE_LAST_CHECKED, System.currentTimeMillis())
                                             }
                                         } catch (e: ActivityNotFoundException) {
-                                            requireContext().toast(R.string.no_browser_found)
+                                            Toast.makeText(requireContext(), R.string.no_browser_found, Toast.LENGTH_LONG).show()
                                         }
                                     } else {
-                                        viewModel.downloadUpdate(requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"), it)
+                                        val binding = DialogUpdateDownloadBinding.inflate(layoutInflater)
+                                        updateDownloadDialogBinding = binding
+                                        val size = viewModel.updateSize
+                                        if (size != null) {
+                                            binding.textView.text = getString(
+                                                R.string.downloading_update_progress,
+                                                Formatter.formatFileSize(requireContext(), 0),
+                                                Formatter.formatFileSize(requireContext(), size),
+                                            )
+                                        } else {
+                                            binding.textView.text = getString(R.string.downloading_update)
+                                            binding.progressBar.visibility = View.GONE
+                                        }
+                                        viewModel.downloadUpdate(requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP), it)
+                                        val dialog = requireActivity().getAlertDialogBuilder()
+                                            .setView(binding.root)
+                                            .setNegativeButton(getString(android.R.string.cancel), null)
+                                            .setOnDismissListener {
+                                                viewModel.updateJob?.cancel()
+                                                updateDownloadDialogBinding = null
+                                                updateDownloadDialog = null
+                                            }
+                                            .show()
+                                        updateDownloadDialog = dialog
                                     }
                                 }
                                 .setNegativeButton(getString(R.string.no), null)
                                 .show()
                         } else {
-                            requireContext().toast(R.string.no_updates_found)
+                            Toast.makeText(requireContext(), R.string.no_updates_found, Toast.LENGTH_LONG).show()
                         }
+                    }
+                }
+            }
+            viewLifecycleOwner.lifecycleScope.launch {
+                repeatOnLifecycle(Lifecycle.State.STARTED) {
+                    viewModel.updateProgress.collectLatest {
+                        updateDownloadDialogBinding?.let { binding ->
+                            val size = viewModel.updateSize
+                            if (size != null) {
+                                binding.textView.text = getString(
+                                    R.string.downloading_update_progress,
+                                    Formatter.formatFileSize(requireContext(), it.toLong()),
+                                    Formatter.formatFileSize(requireContext(), size),
+                                )
+                                binding.progressBar.progress = (((it.toFloat() / size) * 100)).toInt()
+                            }
+                        }
+                    }
+                }
+            }
+            viewLifecycleOwner.lifecycleScope.launch {
+                repeatOnLifecycle(Lifecycle.State.STARTED) {
+                    viewModel.closeUpdateDialog.collectLatest {
+                        updateDownloadDialog?.dismiss()
                     }
                 }
             }
@@ -537,12 +605,14 @@ class SettingsActivity : AppCompatActivity() {
                 requireActivity().recreate()
                 true
             }
-            findPreference<SwitchPreferenceCompat>(C.UI_ROUNDUSERIMAGE)?.onPreferenceChangeListener = changeListener
+            findPreference<SwitchPreferenceCompat>(C.UI_ROUND_USER_IMAGE)?.onPreferenceChangeListener = changeListener
             findPreference<ListPreference>(C.THEME)?.onPreferenceChangeListener = changeListener
-            findPreference<SwitchPreferenceCompat>(C.UI_THEME_ROUNDED_CORNERS)?.onPreferenceChangeListener = changeListener
             findPreference<SwitchPreferenceCompat>(C.UI_THEME_FOLLOW_SYSTEM)?.onPreferenceChangeListener = changeListener
             findPreference<ListPreference>(C.UI_THEME_DARK_ON)?.onPreferenceChangeListener = changeListener
             findPreference<ListPreference>(C.UI_THEME_DARK_OFF)?.onPreferenceChangeListener = changeListener
+            findPreference<ListPreference>(C.UI_THEME_ROUNDED_CORNERS)?.onPreferenceChangeListener = changeListener
+            findPreference<SwitchPreferenceCompat>(C.UI_THEME_REDUCED_PADDING)?.onPreferenceChangeListener = changeListener
+            findPreference<SwitchPreferenceCompat>(C.UI_THEME_COMPACT_TEXT)?.onPreferenceChangeListener = changeListener
             findPreference<SwitchPreferenceCompat>(C.UI_THEME_APPBAR_LIFT)?.onPreferenceChangeListener = changeListener
             findPreference<SwitchPreferenceCompat>(C.UI_THEME_BOTTOM_NAV_COLOR)?.onPreferenceChangeListener = changeListener
             findPreference<SwitchPreferenceCompat>(C.UI_THEME_MATERIAL3)?.onPreferenceChangeListener = changeListener
@@ -579,7 +649,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     class UiSettingsFragment : MaterialPreferenceFragment() {
-        private val viewModel: SettingsViewModel by activityViewModels()
+        private val viewModel: SettingsViewModel by activityViewModels { SettingsViewModelFactory }
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             setPreferencesFromResource(R.xml.ui_preferences, rootKey)
@@ -587,13 +657,13 @@ class SettingsActivity : AppCompatActivity() {
                 (requireActivity() as? SettingsActivity)?.setResult()
                 true
             }
-            findPreference<SwitchPreferenceCompat>(C.UI_ROUNDUSERIMAGE)?.onPreferenceChangeListener = changeListener
-            findPreference<SwitchPreferenceCompat>(C.UI_TRUNCATEVIEWCOUNT)?.onPreferenceChangeListener = changeListener
+            findPreference<SwitchPreferenceCompat>(C.UI_ROUND_USER_IMAGE)?.onPreferenceChangeListener = changeListener
+            findPreference<SwitchPreferenceCompat>(C.UI_TRUNCATE_VIEW_COUNT)?.onPreferenceChangeListener = changeListener
             findPreference<SwitchPreferenceCompat>(C.UI_UPTIME)?.onPreferenceChangeListener = changeListener
             findPreference<SwitchPreferenceCompat>(C.UI_TAGS)?.onPreferenceChangeListener = changeListener
-            findPreference<SwitchPreferenceCompat>(C.UI_BROADCASTERSCOUNT)?.onPreferenceChangeListener = changeListener
+            findPreference<SwitchPreferenceCompat>(C.UI_BROADCASTERS_COUNT)?.onPreferenceChangeListener = changeListener
             findPreference<SwitchPreferenceCompat>(C.UI_BOOKMARK_TIME_LEFT)?.onPreferenceChangeListener = changeListener
-            findPreference<SwitchPreferenceCompat>(C.UI_SCROLLTOP)?.onPreferenceChangeListener = changeListener
+            findPreference<SwitchPreferenceCompat>(C.UI_SCROLL_TOP)?.onPreferenceChangeListener = changeListener
             findPreference<ListPreference>(C.PORTRAIT_COLUMN_COUNT)?.onPreferenceChangeListener = changeListener
             findPreference<ListPreference>(C.LANDSCAPE_COLUMN_COUNT)?.onPreferenceChangeListener = changeListener
             findPreference<ListPreference>(C.COMPACT_STREAMS)?.onPreferenceChangeListener = changeListener
@@ -715,7 +785,7 @@ class SettingsActivity : AppCompatActivity() {
                     SettingsDragListItem(
                         key = split[0],
                         text = when (split[0]) {
-                            "0" -> getString(R.string.suggested)
+                            "0" -> getString(R.string.suggestions)
                             "1" -> getString(R.string.videos)
                             "2" -> getString(R.string.clips)
                             "3" -> getString(R.string.chat)
@@ -848,7 +918,9 @@ class SettingsActivity : AppCompatActivity() {
             findPreference<SeekBarPreference>("chatWidth")?.apply {
                 setOnPreferenceChangeListener { _, newValue ->
                     (requireActivity() as? SettingsActivity)?.setResult()
-                    val chatWidth = DisplayUtils.calculateLandscapeWidthByPercent(requireActivity(), newValue as Int)
+                    val width = resources.displayMetrics.widthPixels
+                    val height = resources.displayMetrics.heightPixels
+                    val chatWidth = ((if (height > width) height else width) * (newValue as Int / 100f)).toInt()
                     requireContext().prefs().edit { putInt(C.LANDSCAPE_CHAT_WIDTH, chatWidth) }
                     true
                 }
@@ -933,7 +1005,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     class PlayerSettingsFragment : MaterialPreferenceFragment() {
-        private val viewModel: SettingsViewModel by activityViewModels()
+        private val viewModel: SettingsViewModel by activityViewModels { SettingsViewModelFactory }
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             setPreferencesFromResource(R.xml.player_preferences, rootKey)
@@ -990,12 +1062,16 @@ class SettingsActivity : AppCompatActivity() {
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             setPreferencesFromResource(R.xml.player_button_preferences, rootKey)
             findPreference<SwitchPreferenceCompat>("sleep_timer_lock")?.setOnPreferenceChangeListener { _, newValue ->
-                if (newValue == true && !(requireContext().getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager).isAdminActive(ComponentName(requireContext(), AdminReceiver::class.java))) {
-                    requireContext().startActivity(
-                        Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
-                            putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, ComponentName(requireContext(), AdminReceiver::class.java))
-                        }
-                    )
+                if (newValue == true) {
+                    val devicePolicyManager = requireContext().getSystemService(DEVICE_POLICY_SERVICE) as DevicePolicyManager
+                    val admin = ComponentName(requireContext(), DeviceAdminReceiver::class.java)
+                    if (!devicePolicyManager.isAdminActive(admin)) {
+                        startActivity(
+                            Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                                putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, admin)
+                            }
+                        )
+                    }
                 }
                 true
             }
@@ -1010,6 +1086,28 @@ class SettingsActivity : AppCompatActivity() {
                 requireActivity().findViewById<AppBarLayout>(R.id.appBar)?.setExpanded(true)
                 findNavController().navigate(SettingsNavGraphDirections.actionGlobalPlayerMenuSettingsFragment())
                 true
+            }
+            findPreference<EditTextPreference>(C.PLAYER_REWIND)?.apply {
+                summary = getString(R.string.seconds_full, requireContext().prefs().getString(C.PLAYER_REWIND, "10"))
+                setOnPreferenceChangeListener { _, newValue ->
+                    summary = getString(R.string.seconds_full, newValue.toString())
+                    true
+                }
+                setOnBindEditTextListener {
+                    it.inputType = InputType.TYPE_CLASS_NUMBER
+                    it.setSelection(it.text.length)
+                }
+            }
+            findPreference<EditTextPreference>(C.PLAYER_FORWARD)?.apply {
+                summary = getString(R.string.seconds_full, requireContext().prefs().getString(C.PLAYER_FORWARD, "10"))
+                setOnPreferenceChangeListener { _, newValue ->
+                    summary = getString(R.string.seconds_full, newValue.toString())
+                    true
+                }
+                setOnBindEditTextListener {
+                    it.inputType = InputType.TYPE_CLASS_NUMBER
+                    it.setSelection(it.text.length)
+                }
             }
         }
 
@@ -1113,44 +1211,14 @@ class SettingsActivity : AppCompatActivity() {
         }
     }
 
-    class ProxySettingsFragment : MaterialPreferenceFragment() {
-        override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
-            setPreferencesFromResource(R.xml.proxy_preferences, rootKey)
-        }
-
-        override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-            super.onViewCreated(view, savedInstanceState)
-            ViewCompat.setOnApplyWindowInsetsListener(view) { _, windowInsets ->
-                val insets = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars())
-                listView.updatePadding(bottom = insets.bottom)
-                WindowInsetsCompat.CONSUMED
-            }
-            requireActivity().findViewById<AppBarLayout>(R.id.appBar)?.let { appBar ->
-                if (requireContext().prefs().getBoolean(C.UI_THEME_APPBAR_LIFT, true)) {
-                    listView.let {
-                        appBar.setLiftOnScrollTargetView(it)
-                        it.addOnScrollListener(object : RecyclerView.OnScrollListener() {
-                            override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
-                                super.onScrolled(recyclerView, dx, dy)
-                                appBar.isLifted = recyclerView.canScrollVertically(-1)
-                            }
-                        })
-                        it.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-                            appBar.isLifted = it.canScrollVertically(-1)
-                        }
-                    }
-                } else {
-                    appBar.setLiftable(false)
-                    appBar.background = null
-                }
-            }
-            (requireActivity() as? SettingsActivity)?.getSelectedSearchItem()?.let { scrollToPreference(it) }
-        }
-    }
-
     class PlaybackSettingsFragment : MaterialPreferenceFragment() {
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             setPreferencesFromResource(R.xml.playback_preferences, rootKey)
+            findPreference<Preference>("video_swap_settings")?.setOnPreferenceClickListener {
+                requireActivity().findViewById<AppBarLayout>(R.id.appBar)?.setExpanded(true)
+                findNavController().navigate(SettingsNavGraphDirections.actionGlobalVideoSwapSettingsFragment())
+                true
+            }
         }
 
         override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
@@ -1269,7 +1337,7 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     class DownloadSettingsFragment : MaterialPreferenceFragment() {
-        private val viewModel: SettingsViewModel by activityViewModels()
+        private val viewModel: SettingsViewModel by activityViewModels { SettingsViewModelFactory }
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             setPreferencesFromResource(R.xml.download_preferences, rootKey)
@@ -1321,7 +1389,7 @@ class SettingsActivity : AppCompatActivity() {
                     try {
                         val intent = Intent(
                             Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                            Uri.parse("package:${requireContext().packageName}")
+                            "package:${requireContext().packageName}".toUri()
                         )
                         startActivity(intent)
                     } catch (e: ActivityNotFoundException) {
@@ -1346,7 +1414,7 @@ class SettingsActivity : AppCompatActivity() {
                     try {
                         val intent = Intent(
                             Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                            Uri.parse("package:${requireContext().packageName}")
+                            "package:${requireContext().packageName}".toUri()
                         )
                         startActivity(intent)
                     } catch (e: ActivityNotFoundException) {
@@ -1390,104 +1458,6 @@ class SettingsActivity : AppCompatActivity() {
     class DebugSettingsFragment : MaterialPreferenceFragment() {
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             setPreferencesFromResource(R.xml.debug_preferences, rootKey)
-            findPreference<Preference>("api_settings")?.setOnPreferenceClickListener { preference ->
-                var newId = 1000
-                val view = LinearLayout(requireContext()).apply {
-                    id = R.id.layout
-                    orientation = LinearLayout.VERTICAL
-                }
-                val list = listOf(
-                    Triple(getString(R.string.games), C.API_PREFS_GAMES, C.DEFAULT_API_PREFS_GAMES),
-                    Triple(getString(R.string.streams), C.API_PREFS_STREAMS, C.DEFAULT_API_PREFS_STREAMS),
-                    Triple(getString(R.string.followed_games), C.API_PREFS_FOLLOWED_GAMES, C.DEFAULT_API_PREFS_FOLLOWED_GAMES),
-                    Triple(getString(R.string.followed_streams), C.API_PREFS_FOLLOWED_STREAMS, C.DEFAULT_API_PREFS_FOLLOWED_STREAMS),
-                    Triple(getString(R.string.followed_videos), C.API_PREFS_FOLLOWED_VIDEOS, C.DEFAULT_API_PREFS_FOLLOWED_VIDEOS),
-                    Triple(getString(R.string.followed_channels), C.API_PREFS_FOLLOWED_CHANNELS, C.DEFAULT_API_PREFS_FOLLOWED_CHANNELS),
-                    Triple(getString(R.string.channel_videos), C.API_PREFS_CHANNEL_VIDEOS, C.DEFAULT_API_PREFS_CHANNEL_VIDEOS),
-                    Triple(getString(R.string.channel_clips), C.API_PREFS_CHANNEL_CLIPS, C.DEFAULT_API_PREFS_CHANNEL_CLIPS),
-                    Triple(getString(R.string.game_videos), C.API_PREFS_GAME_VIDEOS, C.DEFAULT_API_PREFS_GAME_VIDEOS),
-                    Triple(getString(R.string.game_streams), C.API_PREFS_GAME_STREAMS, C.DEFAULT_API_PREFS_GAME_STREAMS),
-                    Triple(getString(R.string.game_clips), C.API_PREFS_GAME_CLIPS, C.DEFAULT_API_PREFS_GAME_CLIPS),
-                    Triple(getString(R.string.search_videos), C.API_PREFS_SEARCH_VIDEOS, C.DEFAULT_API_PREFS_SEARCH_VIDEOS),
-                    Triple(getString(R.string.search_streams), C.API_PREFS_SEARCH_STREAMS, C.DEFAULT_API_PREFS_SEARCH_STREAMS),
-                    Triple(getString(R.string.search_channels), C.API_PREFS_SEARCH_CHANNELS, C.DEFAULT_API_PREFS_SEARCH_CHANNELS),
-                    Triple(getString(R.string.search_games), C.API_PREFS_SEARCH_GAMES, C.DEFAULT_API_PREFS_SEARCH_GAMES),
-                ).map { item ->
-                    newId++
-                    view.addView(TextView(requireContext()).apply {
-                        text = item.first
-                        layoutParams = LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT
-                        ).apply {
-                            setMargins(context.convertDpToPixels(20F), context.convertDpToPixels(3F), context.convertDpToPixels(20F), context.convertDpToPixels(3F))
-                        }
-                        context.obtainStyledAttributes(intArrayOf(com.google.android.material.R.attr.textAppearanceTitleMedium)).use {
-                            TextViewCompat.setTextAppearance(this, it.getResourceId(0, 0))
-                        }
-                    })
-                    val prefKey = item.second
-                    val list = (requireContext().prefs().getString(prefKey, null) ?: item.third).split(',').map {
-                        val split = it.split(':')
-                        SettingsDragListItem(
-                            key = split[0],
-                            text = when (split[0]) {
-                                "0" -> getString(R.string.api_gql)
-                                "1" -> getString(R.string.api_gql_persisted_query)
-                                "2" -> getString(R.string.api_helix)
-                                else -> getString(R.string.api_gql)
-                            },
-                            default = false,
-                            enabled = split[1] != "0",
-                        )
-                    }
-                    val listAdapter = SettingsDragListAdapter()
-                    val itemTouchHelper = ItemTouchHelper(
-                        object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
-                            override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
-                                Collections.swap(list, viewHolder.bindingAdapterPosition, target.bindingAdapterPosition)
-                                listAdapter.notifyItemMoved(viewHolder.bindingAdapterPosition, target.bindingAdapterPosition)
-                                return true
-                            }
-
-                            override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
-
-                            override fun isLongPressDragEnabled(): Boolean {
-                                return false
-                            }
-                        }
-                    )
-                    listAdapter.itemTouchHelper = itemTouchHelper
-                    val recyclerView = RecyclerView(requireContext()).apply {
-                        id = newId
-                        layoutManager = LinearLayoutManager(requireContext())
-                        adapter = listAdapter
-                    }
-                    itemTouchHelper.attachToRecyclerView(recyclerView)
-                    listAdapter.submitList(list)
-                    view.addView(recyclerView)
-                    prefKey to listAdapter
-                }
-                requireContext().getAlertDialogBuilder()
-                    .setTitle(preference.title)
-                    .setView(NestedScrollView(requireContext()).apply {
-                        addView(view)
-                        setPadding(0, context.convertDpToPixels(10F), 0, 0)
-                    })
-                    .setPositiveButton(getString(android.R.string.ok)) { _, _ ->
-                        requireContext().prefs().edit {
-                            list.forEach { item ->
-                                putString(item.first, item.second.currentList.joinToString(",") {
-                                    "${it.key}:${if (it.enabled) "1" else "0"}"
-                                })
-                            }
-                            (requireActivity() as? SettingsActivity)?.setResult()
-                        }
-                    }
-                    .setNegativeButton(getString(android.R.string.cancel), null)
-                    .show()
-                true
-            }
             findPreference<EditTextPreference>("gql_headers")?.apply {
                 isPersistent = false
                 text = requireContext().tokenPrefs().getString(C.GQL_HEADERS, null)
@@ -1499,27 +1469,8 @@ class SettingsActivity : AppCompatActivity() {
                 }
             }
             findPreference<Preference>("get_integrity_token")?.setOnPreferenceClickListener {
-                IntegrityDialog.show(childFragmentManager)
+                IntegrityDialog.newInstance(null).show(childFragmentManager, null)
                 true
-            }
-            val httpEngine = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S) >= 7
-            val cronet = CronetProvider.getAllProviders(requireContext()).any { it.isEnabled }
-            if (!httpEngine || !cronet) {
-                findPreference<ListPreference>(C.NETWORK_LIBRARY)?.apply {
-                    when {
-                        !httpEngine && !cronet -> {
-                            isVisible = false
-                        }
-                        !cronet -> {
-                            setEntries(R.array.networkLibraryEntriesNoCronet)
-                            setEntryValues(R.array.networkLibraryEntriesNoCronet)
-                        }
-                        else -> {
-                            setEntries(R.array.networkLibraryEntriesNoHttpEngine)
-                            setEntryValues(R.array.networkLibraryEntriesNoHttpEngine)
-                        }
-                    }
-                }
             }
         }
 
@@ -1617,20 +1568,19 @@ class SettingsActivity : AppCompatActivity() {
                 val list = mutableListOf<SettingsSearchItem>()
                 val preferenceManager = PreferenceManager(requireContext())
                 listOf(
-                    Triple(R.xml.api_token_preferences, SettingsNavGraphDirections.actionGlobalApiTokenSettingsFragment(), requireContext().getString(R.string.api_token_settings)),
-                    Triple(R.xml.buffer_preferences, SettingsNavGraphDirections.actionGlobalBufferSettingsFragment(), requireContext().getString(R.string.buffer_settings)),
-                    Triple(R.xml.chat_preferences, SettingsNavGraphDirections.actionGlobalChatSettingsFragment(), requireContext().getString(R.string.chat_settings)),
-                    Triple(R.xml.debug_preferences, SettingsNavGraphDirections.actionGlobalDebugSettingsFragment(), requireContext().getString(R.string.debug_settings)),
-                    Triple(R.xml.download_preferences, SettingsNavGraphDirections.actionGlobalDownloadSettingsFragment(), requireContext().getString(R.string.download_settings)),
-                    Triple(R.xml.playback_preferences, SettingsNavGraphDirections.actionGlobalPlaybackSettingsFragment(), requireContext().getString(R.string.playback_settings)),
-                    Triple(R.xml.player_button_preferences, SettingsNavGraphDirections.actionGlobalPlayerButtonSettingsFragment(), requireContext().getString(R.string.player_buttons)),
-                    Triple(R.xml.player_menu_preferences, SettingsNavGraphDirections.actionGlobalPlayerMenuSettingsFragment(), requireContext().getString(R.string.player_menu_settings)),
-                    Triple(R.xml.player_preferences, SettingsNavGraphDirections.actionGlobalPlayerSettingsFragment(), requireContext().getString(R.string.player_settings)),
-                    Triple(R.xml.proxy_preferences, SettingsNavGraphDirections.actionGlobalProxySettingsFragment(), requireContext().getString(R.string.proxy_settings)),
+                    Triple(R.xml.api_token_preferences, SettingsNavGraphDirections.actionGlobalApiTokenSettingsFragment(), getString(R.string.api_token_settings)),
+                    Triple(R.xml.buffer_preferences, SettingsNavGraphDirections.actionGlobalBufferSettingsFragment(), getString(R.string.buffer_settings)),
+                    Triple(R.xml.chat_preferences, SettingsNavGraphDirections.actionGlobalChatSettingsFragment(), getString(R.string.chat_settings)),
+                    Triple(R.xml.debug_preferences, SettingsNavGraphDirections.actionGlobalDebugSettingsFragment(), getString(R.string.debug_settings)),
+                    Triple(R.xml.download_preferences, SettingsNavGraphDirections.actionGlobalDownloadSettingsFragment(), getString(R.string.download_settings)),
+                    Triple(R.xml.playback_preferences, SettingsNavGraphDirections.actionGlobalPlaybackSettingsFragment(), getString(R.string.playback_settings)),
+                    Triple(R.xml.player_button_preferences, SettingsNavGraphDirections.actionGlobalPlayerButtonSettingsFragment(), getString(R.string.player_buttons)),
+                    Triple(R.xml.player_menu_preferences, SettingsNavGraphDirections.actionGlobalPlayerMenuSettingsFragment(), getString(R.string.player_menu_settings)),
+                    Triple(R.xml.player_preferences, SettingsNavGraphDirections.actionGlobalPlayerSettingsFragment(), getString(R.string.player_settings)),
                     Triple(R.xml.root_preferences, SettingsNavGraphDirections.actionGlobalSettingsFragment(), null),
-                    Triple(R.xml.theme_preferences, SettingsNavGraphDirections.actionGlobalThemeSettingsFragment(), requireContext().getString(R.string.theme)),
-                    Triple(R.xml.ui_preferences, SettingsNavGraphDirections.actionGlobalUiSettingsFragment(), requireContext().getString(R.string.ui_settings)),
-                    Triple(R.xml.update_preferences, SettingsNavGraphDirections.actionGlobalUpdateSettingsFragment(), requireContext().getString(R.string.update_settings)),
+                    Triple(R.xml.theme_preferences, SettingsNavGraphDirections.actionGlobalThemeSettingsFragment(), getString(R.string.theme)),
+                    Triple(R.xml.ui_preferences, SettingsNavGraphDirections.actionGlobalUiSettingsFragment(), getString(R.string.ui_settings)),
+                    Triple(R.xml.update_preferences, SettingsNavGraphDirections.actionGlobalUpdateSettingsFragment(), getString(R.string.update_settings)),
                 ).forEach { item ->
                     preferenceManager.inflateFromResource(requireContext(), item.first, null).forEach {
                         when (it) {
@@ -1642,9 +1592,9 @@ class SettingsActivity : AppCompatActivity() {
                                     title = it.title,
                                     summary = it.summary,
                                     value = if (it.isChecked) {
-                                        requireContext().getString(R.string.enabled_setting)
+                                        getString(R.string.enabled_setting)
                                     } else {
-                                        requireContext().getString(R.string.disabled_setting)
+                                        getString(R.string.disabled_setting)
                                     }
                                 ))
                             }

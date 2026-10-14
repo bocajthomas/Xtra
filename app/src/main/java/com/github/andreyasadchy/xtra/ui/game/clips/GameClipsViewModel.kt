@@ -3,33 +3,36 @@ package com.github.andreyasadchy.xtra.ui.game.clips
 import android.content.Context
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
+import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.cachedIn
-import com.github.andreyasadchy.xtra.model.ui.SortGame
+import com.github.andreyasadchy.xtra.XtraApp
+import com.github.andreyasadchy.xtra.graphql.type.ClipsPeriod
+import com.github.andreyasadchy.xtra.graphql.type.Language
+import com.github.andreyasadchy.xtra.model.ui.GameSort
+import com.github.andreyasadchy.xtra.repository.GameSortRepository
 import com.github.andreyasadchy.xtra.repository.GraphQLRepository
 import com.github.andreyasadchy.xtra.repository.HelixRepository
-import com.github.andreyasadchy.xtra.repository.SortGameRepository
 import com.github.andreyasadchy.xtra.repository.datasource.GameClipsDataSource
-import com.github.andreyasadchy.xtra.type.ClipsPeriod
-import com.github.andreyasadchy.xtra.type.Language
 import com.github.andreyasadchy.xtra.ui.common.VideosSortDialog
 import com.github.andreyasadchy.xtra.ui.game.GamePagerFragmentArgs
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
 import com.github.andreyasadchy.xtra.util.prefs
-import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
-import javax.inject.Inject
+import kotlin.time.Clock
+import kotlin.time.Duration.Companion.days
 
-@HiltViewModel
-class GameClipsViewModel @Inject constructor(
-    @param:ApplicationContext private val applicationContext: Context,
-    private val sortGameRepository: SortGameRepository,
+class GameClipsViewModel(
+    private val applicationContext: Context,
+    private val gameSortRepository: GameSortRepository,
     private val graphQLRepository: GraphQLRepository,
     private val helixRepository: HelixRepository,
     savedStateHandle: SavedStateHandle,
@@ -46,24 +49,25 @@ class GameClipsViewModel @Inject constructor(
         get() = filter.value?.languages ?: emptyArray()
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    val flow = filter.flatMapLatest { filter ->
+    val flow = filter.flatMapLatest {
         Pager(
             PagingConfig(pageSize = 20, prefetchDistance = 3, initialLoadSize = 20)
         ) {
             val started = when (period) {
                 VideosSortDialog.PERIOD_ALL -> null
-                else -> TwitchApiHelper.getClipTime(
-                    when (period) {
+                else -> {
+                    val days = when (period) {
                         VideosSortDialog.PERIOD_DAY -> 1
                         VideosSortDialog.PERIOD_WEEK -> 7
                         VideosSortDialog.PERIOD_MONTH -> 30
                         else -> 7
                     }
-                )
+                    (Clock.System.now() - days.days).toString()
+                }
             }
             val ended = when (period) {
                 VideosSortDialog.PERIOD_ALL -> null
-                else -> TwitchApiHelper.getClipTime(0)
+                else -> Clock.System.now().toString()
             }
             val gqlQueryPeriod = when (period) {
                 VideosSortDialog.PERIOD_DAY -> ClipsPeriod.LAST_DAY
@@ -96,27 +100,21 @@ class GameClipsViewModel @Inject constructor(
                 gqlHeaders = TwitchApiHelper.getGQLHeaders(applicationContext),
                 graphQLRepository = graphQLRepository,
                 enableIntegrity = applicationContext.prefs().getBoolean(C.ENABLE_INTEGRITY, false),
-                apiPref = (applicationContext.prefs().getString(C.API_PREFS_GAME_CLIPS, null) ?: C.DEFAULT_API_PREFS_GAME_CLIPS).split(',').mapNotNull {
-                    val split = it.split(':')
-                    val key = split[0]
-                    val enabled = split[1] != "0"
-                    if (enabled) key else null
-                },
-                networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+                networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
             )
         }.flow
     }.cachedIn(viewModelScope)
 
-    suspend fun getSortGame(id: String): SortGame? {
-        return sortGameRepository.getById(id)
+    suspend fun getGameSort(id: String): GameSort? {
+        return gameSortRepository.getById(id)
     }
 
-    suspend fun saveSortGame(item: SortGame) {
-        sortGameRepository.save(item)
+    suspend fun saveGameSort(item: GameSort) {
+        gameSortRepository.save(item)
     }
 
-    suspend fun deleteSortGame(item: SortGame) {
-        sortGameRepository.delete(item)
+    suspend fun deleteGameSort(item: GameSort) {
+        gameSortRepository.delete(item)
     }
 
     fun setFilter(period: String?, languages: Array<String>?) {
@@ -127,4 +125,15 @@ class GameClipsViewModel @Inject constructor(
         val period: String?,
         val languages: Array<String>?,
     )
+
+    companion object {
+        val GameClipsViewModelFactory = viewModelFactory {
+            initializer {
+                val savedStateHandle = createSavedStateHandle()
+                val application = (this[APPLICATION_KEY] as XtraApp)
+                val xtraModule = application.xtraModule
+                GameClipsViewModel(application.applicationContext, xtraModule.gameSortRepository, xtraModule.graphQLRepository, xtraModule.helixRepository, savedStateHandle)
+            }
+        }
+    }
 }

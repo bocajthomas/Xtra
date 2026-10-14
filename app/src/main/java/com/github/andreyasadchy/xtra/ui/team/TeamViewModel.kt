@@ -3,31 +3,33 @@ package com.github.andreyasadchy.xtra.ui.team
 import android.content.Context
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
+import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.cachedIn
+import com.github.andreyasadchy.xtra.XtraApp
 import com.github.andreyasadchy.xtra.model.ui.Team
 import com.github.andreyasadchy.xtra.repository.GraphQLRepository
 import com.github.andreyasadchy.xtra.repository.datasource.TeamMembersDataSource
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
 import com.github.andreyasadchy.xtra.util.prefs
-import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
-import javax.inject.Inject
 
-@HiltViewModel
-class TeamViewModel @Inject constructor(
-    @param:ApplicationContext private val applicationContext: Context,
+class TeamViewModel(
+    private val applicationContext: Context,
     private val graphQLRepository: GraphQLRepository,
     savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
 
-    val integrity = MutableStateFlow<String?>(null)
+    val integrity = MutableSharedFlow<String?>()
 
     private val args = TeamFragmentArgs.fromSavedStateHandle(savedStateHandle)
     val team = MutableStateFlow<Team?>(null)
@@ -43,7 +45,7 @@ class TeamViewModel @Inject constructor(
             gqlHeaders = TwitchApiHelper.getGQLHeaders(applicationContext),
             graphQLRepository = graphQLRepository,
             enableIntegrity = applicationContext.prefs().getBoolean(C.ENABLE_INTEGRITY, false),
-            networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+            networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
         )
     }.flow.cachedIn(viewModelScope)
 
@@ -53,9 +55,9 @@ class TeamViewModel @Inject constructor(
             viewModelScope.launch {
                 val response = try {
                     val response = graphQLRepository.loadQueryTeam(networkLibrary, gqlHeaders, teamName)
-                    if (enableIntegrity && integrity.value == null) {
-                        response.errors?.find { it.message == "failed integrity check" }?.let {
-                            integrity.value = "refresh"
+                    if (enableIntegrity) {
+                        response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                            integrity.emit("refresh")
                             isLoading = false
                             return@launch
                         }
@@ -76,6 +78,17 @@ class TeamViewModel @Inject constructor(
                 }
                 team.value = response
                 isLoading = false
+            }
+        }
+    }
+
+    companion object {
+        val TeamViewModelFactory = viewModelFactory {
+            initializer {
+                val savedStateHandle = createSavedStateHandle()
+                val application = (this[APPLICATION_KEY] as XtraApp)
+                val xtraModule = application.xtraModule
+                TeamViewModel(application.applicationContext, xtraModule.graphQLRepository, savedStateHandle)
             }
         }
     }

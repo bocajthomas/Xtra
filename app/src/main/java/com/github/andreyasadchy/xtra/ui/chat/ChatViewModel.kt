@@ -5,12 +5,15 @@ import android.content.Context
 import android.util.Base64
 import android.util.JsonReader
 import android.util.JsonToken
-import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import com.github.andreyasadchy.xtra.R
+import com.github.andreyasadchy.xtra.XtraApp
 import com.github.andreyasadchy.xtra.model.chat.Badge
 import com.github.andreyasadchy.xtra.model.chat.ChannelPointReward
 import com.github.andreyasadchy.xtra.model.chat.ChatMessage
@@ -23,91 +26,84 @@ import com.github.andreyasadchy.xtra.model.chat.Prediction
 import com.github.andreyasadchy.xtra.model.chat.Raid
 import com.github.andreyasadchy.xtra.model.chat.RecentEmote
 import com.github.andreyasadchy.xtra.model.chat.RoomState
-import com.github.andreyasadchy.xtra.model.chat.StvBadge
+import com.github.andreyasadchy.xtra.model.chat.STVBadge
+import com.github.andreyasadchy.xtra.model.chat.STVUser
 import com.github.andreyasadchy.xtra.model.chat.TwitchBadge
 import com.github.andreyasadchy.xtra.model.chat.TwitchEmote
+import com.github.andreyasadchy.xtra.model.chat.VideoChatMessage
+import com.github.andreyasadchy.xtra.model.ui.TranslatedChannel
 import com.github.andreyasadchy.xtra.repository.GraphQLRepository
 import com.github.andreyasadchy.xtra.repository.HelixRepository
 import com.github.andreyasadchy.xtra.repository.PlayerRepository
-import com.github.andreyasadchy.xtra.repository.TranslateAllMessagesUsersRepository
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
-import com.github.andreyasadchy.xtra.util.chat.ChatReadIRC
+import com.github.andreyasadchy.xtra.util.chat.ChatReadIRCSocket
 import com.github.andreyasadchy.xtra.util.chat.ChatReadWebSocket
-import com.github.andreyasadchy.xtra.util.chat.ChatReadWebSocketOkHttp
 import com.github.andreyasadchy.xtra.util.chat.ChatUtils
-import com.github.andreyasadchy.xtra.util.chat.ChatWriteIRC
+import com.github.andreyasadchy.xtra.util.chat.ChatWriteIRCSocket
 import com.github.andreyasadchy.xtra.util.chat.ChatWriteWebSocket
-import com.github.andreyasadchy.xtra.util.chat.ChatWriteWebSocketOkHttp
 import com.github.andreyasadchy.xtra.util.chat.EventSubUtils
 import com.github.andreyasadchy.xtra.util.chat.EventSubWebSocket
-import com.github.andreyasadchy.xtra.util.chat.EventSubWebSocketOkHttp
 import com.github.andreyasadchy.xtra.util.chat.HermesWebSocket
-import com.github.andreyasadchy.xtra.util.chat.HermesWebSocketOkHttp
 import com.github.andreyasadchy.xtra.util.chat.PubSubUtils
-import com.github.andreyasadchy.xtra.util.chat.PubSubWebSocket
-import com.github.andreyasadchy.xtra.util.chat.RecentMessageUtils
-import com.github.andreyasadchy.xtra.util.chat.StvEventApiWebSocket
-import com.github.andreyasadchy.xtra.util.chat.StvEventApiWebSocketOkHttp
+import com.github.andreyasadchy.xtra.util.chat.STVEventApiUtils
+import com.github.andreyasadchy.xtra.util.chat.STVEventApiWebSocket
 import com.github.andreyasadchy.xtra.util.prefs
 import com.github.andreyasadchy.xtra.util.tokenPrefs
-import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
-import okhttp3.OkHttpClient
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
-import java.util.Collections
+import java.io.FileOutputStream
 import java.util.Timer
 import java.util.concurrent.ConcurrentHashMap
-import javax.inject.Inject
+import java.util.zip.DeflaterOutputStream
+import java.util.zip.InflaterOutputStream
 import javax.net.ssl.X509TrustManager
 import kotlin.concurrent.scheduleAtFixedRate
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.Instant
 
-
-@HiltViewModel
-class ChatViewModel @Inject constructor(
-    @param:ApplicationContext private val applicationContext: Context,
-    private val translateAllMessagesUsersRepository: TranslateAllMessagesUsersRepository,
+class ChatViewModel(
+    private val applicationContext: Context,
     private val graphQLRepository: GraphQLRepository,
     private val helixRepository: HelixRepository,
     private val playerRepository: PlayerRepository,
-    private val okHttpClient: OkHttpClient,
-    private val trustManager: X509TrustManager?,
+    private val trustManager: Lazy<X509TrustManager>,
     private val json: Json,
 ) : ViewModel() {
 
-    val integrity = MutableStateFlow<String?>(null)
+    val integrity = MutableSharedFlow<String?>()
 
-    private var chatReadIRC: ChatReadIRC? = null
-    private var chatWriteIRC: ChatWriteIRC? = null
-    private var chatReadWebSocketOkHttp: ChatReadWebSocketOkHttp? = null
-    private var chatWriteWebSocketOkHttp: ChatWriteWebSocketOkHttp? = null
+    private var chatReadIRCSocket: ChatReadIRCSocket? = null
+    private var chatWriteIRCSocket: ChatWriteIRCSocket? = null
     private var chatReadWebSocket: ChatReadWebSocket? = null
     private var chatWriteWebSocket: ChatWriteWebSocket? = null
-    private var eventSubOkHttp: EventSubWebSocketOkHttp? = null
+    private var chatReadJob: Job? = null
+    private var chatWriteJob: Job? = null
     private var eventSub: EventSubWebSocket? = null
-    private var hermesWebSocketOkHttp: HermesWebSocketOkHttp? = null
     private var hermesWebSocket: HermesWebSocket? = null
-    private var pubSub: PubSubWebSocket? = null
-    private var stvEventApiOkHttp: StvEventApiWebSocketOkHttp? = null
-    private var stvEventApi: StvEventApiWebSocket? = null
+    private var pubSubJob: Job? = null
+    private var stvEventApi: STVEventApiWebSocket? = null
+    private var stvEventApiJob: Job? = null
     private var stvUserId: String? = null
     private var stvLastPresenceUpdate: Long? = null
-    private val allEmotes = mutableListOf<Emote>()
+    private val allEmotes = mutableListOf<String>()
     private var usedRaidId: String? = null
     private var usedPollId: String? = null
     private var pollTimeoutJob: Job? = null
     private var usedPredictionId: String? = null
     private var predictionTimeoutJob: Job? = null
+    private var started = false
     var autoReconnect = true
 
     private var chatReplayManager: ChatReplayManager? = null
@@ -115,31 +111,13 @@ class ChatViewModel @Inject constructor(
 
     val recentEmotes by lazy { playerRepository.loadRecentEmotesFlow() }
     val hasRecentEmotes = MutableStateFlow(false)
-    private val _userEmotes = MutableStateFlow<List<Emote>?>(null)
-    val userEmotes: StateFlow<List<Emote>?> = _userEmotes
+    val userEmotes = mutableListOf<Emote>()
     private var loadedUserEmotes = false
-    private val _userPersonalEmoteSet = MutableStateFlow<Pair<String, List<Emote>>?>(null)
-    val userPersonalEmoteSet: StateFlow<Pair<String, List<Emote>>?> = _userPersonalEmoteSet
-    private val _localTwitchEmotes = MutableStateFlow<List<TwitchEmote>?>(null)
-    val localTwitchEmotes: StateFlow<List<TwitchEmote>?> = _localTwitchEmotes
-    private val _globalStvEmotes = MutableStateFlow<List<Emote>?>(null)
-    val globalStvEmotes: StateFlow<List<Emote>?> = _globalStvEmotes
-    private val _channelStvEmotes = MutableStateFlow<List<Emote>?>(null)
-    val channelStvEmotes: StateFlow<List<Emote>?> = _channelStvEmotes
-    private val _globalBttvEmotes = MutableStateFlow<List<Emote>?>(null)
-    val globalBttvEmotes: StateFlow<List<Emote>?> = _globalBttvEmotes
-    private val _channelBttvEmotes = MutableStateFlow<List<Emote>?>(null)
-    val channelBttvEmotes: StateFlow<List<Emote>?> = _channelBttvEmotes
-    private val _globalFfzEmotes = MutableStateFlow<List<Emote>?>(null)
-    val globalFfzEmotes: StateFlow<List<Emote>?> = _globalFfzEmotes
-    private val _channelFfzEmotes = MutableStateFlow<List<Emote>?>(null)
-    val channelFfzEmotes: StateFlow<List<Emote>?> = _channelFfzEmotes
-    private val _globalBadges = MutableStateFlow<List<TwitchBadge>?>(null)
-    val globalBadges: StateFlow<List<TwitchBadge>?> = _globalBadges
-    private val _channelBadges = MutableStateFlow<List<TwitchBadge>?>(null)
-    val channelBadges: StateFlow<List<TwitchBadge>?> = _channelBadges
-    private val _cheerEmotes = MutableStateFlow<List<CheerEmote>?>(null)
-    val cheerEmotes: StateFlow<List<CheerEmote>?> = _cheerEmotes
+    val localTwitchEmotes = mutableListOf<TwitchEmote>()
+    val thirdPartyEmotes = mutableListOf<Emote>()
+    val globalBadges = mutableListOf<TwitchBadge>()
+    val channelBadges = mutableListOf<TwitchBadge>()
+    val cheerEmotes = mutableListOf<CheerEmote>()
 
     val roomState = MutableStateFlow<RoomState?>(null)
     val raid = MutableStateFlow<Raid?>(null)
@@ -160,42 +138,39 @@ class ChatViewModel @Inject constructor(
     var streamId: String? = null
     private val rewardList = mutableListOf<ChatMessage>()
     val namePaints = mutableListOf<NamePaint>()
-    val newPaint = MutableStateFlow<NamePaint?>(null)
-    val paintUsers = mutableMapOf<String, String>()
-    val newPaintUser = MutableStateFlow<Pair<String, String>?>(null)
-    val stvBadges = mutableListOf<StvBadge>()
-    val newStvBadge = MutableStateFlow<StvBadge?>(null)
-    val stvBadgeUsers = mutableMapOf<String, String>()
-    val newStvBadgeUser = MutableStateFlow<Pair<String, String>?>(null)
+    val stvBadges = mutableListOf<STVBadge>()
     val personalEmoteSets = mutableMapOf<String, List<Emote>>()
-    val newPersonalEmoteSet = MutableStateFlow<Pair<String, List<Emote>>?>(null)
-    val personalEmoteSetUsers = mutableMapOf<String, String>()
-    val newPersonalEmoteSetUser = MutableStateFlow<Pair<String, String>?>(null)
-    var channelStvEmoteSetId: String? = null
+    val stvUsers = mutableListOf<STVUser>()
+    var channelSTVEmoteSetId: String? = null
+    var userSTVEmoteSetId: String? = null
     val translateAllMessages = MutableStateFlow<Boolean?>(null)
 
     val reloadMessages = MutableStateFlow(false)
-    val scrollDown = MutableStateFlow(false)
     val hideRaid = MutableStateFlow(false)
     val hidePoll = MutableStateFlow(false)
     val hidePrediction = MutableStateFlow(false)
 
-    private var messageLimit = 600
-    private val _chatMessages = MutableStateFlow<MutableList<ChatMessage>>(Collections.synchronizedList(ArrayList(messageLimit + 1)))
-    val chatMessages: StateFlow<MutableList<ChatMessage>> = _chatMessages
-    val newMessage = MutableStateFlow<ChatMessage?>(null)
-    val chatters = ConcurrentHashMap<String?, Chatter>()
-    val newChatter = MutableStateFlow<Chatter?>(null)
+    val newMessage = MutableSharedFlow<Triple<ChatMessage, Int, Int>>()
+    val addMessages = MutableSharedFlow<Pair<List<ChatMessage>, Int>>()
+    val removeMessages = MutableSharedFlow<Int>()
+    val updateUserMessages = MutableSharedFlow<String>()
+    val userEmotesUpdated = MutableSharedFlow<Unit>()
+    val thirdPartyEmotesUpdated = MutableSharedFlow<Unit>()
 
-    fun startLive(networkLibrary: String?, channelId: String?, channelLogin: String?, channelName: String?, streamId: String?) {
-        if (chatReadIRC == null && chatReadWebSocketOkHttp == null && chatReadWebSocket == null && eventSubOkHttp == null && eventSub == null && channelLogin != null) {
+    private var messageLimit = 600
+    val chatMessages = mutableListOf<ChatMessage>()
+    val autoCompleteList = mutableListOf<Any?>()
+    private val chatters = ConcurrentHashMap<String, Chatter>()
+
+    fun startLive(networkLibrary: String?, recentMessagesUrl: String?, channelId: String?, channelLogin: String?, channelName: String?, streamId: String?) {
+        if (chatReadIRCSocket == null && chatReadWebSocket == null && eventSub == null && channelLogin != null) {
             messageLimit = applicationContext.prefs().getInt(C.CHAT_LIMIT, 600)
             this.streamId = streamId
             startLiveChat(channelId, channelLogin)
             addChatter(channelName)
             loadEmotes(channelId, channelLogin)
             if (applicationContext.prefs().getBoolean(C.CHAT_RECENT, true)) {
-                loadRecentMessages(networkLibrary, channelLogin)
+                loadRecentMessages(networkLibrary, recentMessagesUrl, channelLogin)
             }
             val isLoggedIn = !applicationContext.tokenPrefs().getString(C.USERNAME, null).isNullOrBlank() &&
                     (!TwitchApiHelper.getGQLHeaders(applicationContext, true)[C.HEADER_TOKEN].isNullOrBlank() ||
@@ -206,10 +181,10 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    fun startReplay(channelId: String?, channelLogin: String?, chatUrl: String? = null, videoId: String? = null, startTime: Int = 0, getCurrentPosition: () -> Long?, getCurrentSpeed: () -> Float?) {
+    fun startReplay(channelId: String?, channelLogin: String?, chatUrl: String? = null, videoId: String? = null, createdAt: String?, startTime: Int = 0, getCurrentPosition: () -> Long?, getCurrentSpeed: () -> Float?) {
         if (chatReplayManager == null && chatReplayManagerLocal == null) {
             messageLimit = applicationContext.prefs().getInt(C.CHAT_LIMIT, 600)
-            startReplayChat(videoId, startTime, chatUrl, getCurrentPosition, getCurrentSpeed, channelId, channelLogin)
+            startReplayChat(videoId, createdAt, startTime, chatUrl, getCurrentPosition, getCurrentSpeed, channelId, channelLogin)
             if (videoId != null) {
                 loadEmotes(channelId, channelLogin)
             }
@@ -217,14 +192,14 @@ class ChatViewModel @Inject constructor(
     }
 
     fun resumeLive(channelId: String?, channelLogin: String?) {
-        if ((chatReadIRC?.isActive == false || chatReadWebSocketOkHttp?.isActive == false || chatReadWebSocket?.isActive == false || eventSubOkHttp?.isActive == false || eventSub?.isActive == false) && channelLogin != null && autoReconnect) {
+        if ((chatReadJob?.isActive == false) && channelLogin != null && autoReconnect) {
             startLiveChat(channelId, channelLogin)
         }
     }
 
-    fun resumeReplay(channelId: String?, channelLogin: String?, chatUrl: String?, videoId: String?, startTime: Int, getCurrentPosition: () -> Long?, getCurrentSpeed: () -> Float?) {
+    fun resumeReplay(channelId: String?, channelLogin: String?, chatUrl: String?, videoId: String?, createdAt: String?, startTime: Int, getCurrentPosition: () -> Long?, getCurrentSpeed: () -> Float?) {
         if (chatReplayManager?.isActive == false || chatReplayManagerLocal?.isActive == false) {
-            startReplayChat(videoId, startTime, chatUrl, getCurrentPosition, getCurrentSpeed, channelId, channelLogin)
+            startReplayChat(videoId, createdAt, startTime, chatUrl, getCurrentPosition, getCurrentSpeed, channelId, channelLogin)
         }
     }
 
@@ -238,177 +213,510 @@ class ChatViewModel @Inject constructor(
         super.onCleared()
     }
 
-    private fun addEmotes(list: List<Emote>) {
-        allEmotes.addAll(list.filter { it !in allEmotes })
-    }
-
     private fun loadEmotes(channelId: String?, channelLogin: String?) {
-        val networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, "OkHttp")
+        val networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP)
         val helixHeaders = TwitchApiHelper.getHelixHeaders(applicationContext)
         val gqlHeaders = TwitchApiHelper.getGQLHeaders(applicationContext, true)
         val emoteQuality = applicationContext.prefs().getString(C.CHAT_IMAGE_QUALITY, "4") ?: "4"
         val animateGifs = applicationContext.prefs().getBoolean(C.ANIMATED_EMOTES, true)
         val useWebp = applicationContext.prefs().getBoolean(C.CHAT_USE_WEBP, true)
         val enableIntegrity = applicationContext.prefs().getBoolean(C.ENABLE_INTEGRITY, false)
-        savedGlobalBadges.also { saved ->
-            if (!saved.isNullOrEmpty()) {
-                _globalBadges.value = saved
-                if (!reloadMessages.value) {
-                    reloadMessages.value = true
-                }
-            } else {
-                viewModelScope.launch {
-                    try {
-                        playerRepository.loadGlobalBadges(networkLibrary, helixHeaders, gqlHeaders, emoteQuality, enableIntegrity).let { badges ->
-                            if (badges.isNotEmpty()) {
-                                savedGlobalBadges = badges
-                                _globalBadges.value = badges
-                                if (!reloadMessages.value) {
-                                    reloadMessages.value = true
-                                }
-                            }
+        synchronized(thirdPartyEmotes) {
+            thirdPartyEmotes.clear()
+        }
+        val saved = savedGlobalBadges
+        if (!saved.isNullOrEmpty()) {
+            synchronized(globalBadges) {
+                globalBadges.clear()
+                globalBadges.addAll(saved)
+            }
+            if (!reloadMessages.value) {
+                reloadMessages.value = true
+            }
+        } else {
+            viewModelScope.launch {
+                try {
+                    val badges = playerRepository.loadGlobalBadges(networkLibrary, helixHeaders, gqlHeaders, emoteQuality, enableIntegrity)
+                    if (badges.isNotEmpty()) {
+                        savedGlobalBadges = badges
+                        synchronized(globalBadges) {
+                            globalBadges.clear()
+                            globalBadges.addAll(badges)
                         }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to load global badges", e)
-                        if (e.message == "failed integrity check" && integrity.value == null) {
-                            integrity.value = "refresh"
+                        if (!reloadMessages.value) {
+                            reloadMessages.value = true
                         }
+                    }
+                } catch (e: Exception) {
+                    if (e.message == C.FAILED_INTEGRITY_CHECK) {
+                        integrity.emit("refresh")
                     }
                 }
             }
         }
         if (applicationContext.prefs().getBoolean(C.CHAT_ENABLE_STV, true)) {
-            savedGlobalStvEmotes.also { saved ->
-                if (!saved.isNullOrEmpty()) {
-                    addEmotes(saved)
-                    _globalStvEmotes.value = saved
-                    if (!reloadMessages.value) {
-                        reloadMessages.value = true
-                    }
-                } else {
-                    viewModelScope.launch {
+            val saved = savedGlobalSTVEmotes
+            if (!saved.isNullOrEmpty()) {
+                synchronized(thirdPartyEmotes) {
+                    thirdPartyEmotes.addAll(saved)
+                    thirdPartyEmotes.sortBy { it.source }
+                }
+                if (!reloadMessages.value) {
+                    reloadMessages.value = true
+                }
+                viewModelScope.launch {
+                    thirdPartyEmotesUpdated.emit(Unit)
+                }
+                synchronized(autoCompleteList) {
+                    autoCompleteList.addAll(saved.filter { it !in autoCompleteList })
+                }
+                synchronized(allEmotes) {
+                    allEmotes.addAll(saved.filter { it.name !in allEmotes }.mapNotNull { it.name })
+                }
+            } else {
+                viewModelScope.launch {
+                    val pair = try {
+                        playerRepository.loadGlobalSTVEmoteSetResponse(networkLibrary) to true
+                    } catch (e: Exception) {
                         try {
-                            playerRepository.loadGlobalStvEmotes(networkLibrary, useWebp).let { emotes ->
-                                if (emotes.isNotEmpty()) {
-                                    savedGlobalStvEmotes = emotes
-                                    addEmotes(emotes)
-                                    _globalStvEmotes.value = emotes
-                                    if (!reloadMessages.value) {
-                                        reloadMessages.value = true
+                            val compressedBytes = FileInputStream("${applicationContext.cacheDir}/emote_responses/global.stv").use {
+                                it.readBytes()
+                            }
+                            val decompressedStream = ByteArrayOutputStream()
+                            InflaterOutputStream(decompressedStream).use {
+                                it.write(compressedBytes)
+                            }
+                            decompressedStream.toByteArray().decodeToString() to false
+                        } catch (e: Exception) {
+                            null to false
+                        }
+                    }
+                    val response = pair.first
+                    val online = pair.second
+                    if (response != null) {
+                        try {
+                            val emotes = playerRepository.loadSTVEmoteSet(response, useWebp, true).second
+                            if (emotes.isNotEmpty()) {
+                                savedGlobalSTVEmotes = emotes
+                                synchronized(thirdPartyEmotes) {
+                                    thirdPartyEmotes.addAll(emotes)
+                                    thirdPartyEmotes.sortBy { it.source }
+                                }
+                                if (!reloadMessages.value) {
+                                    reloadMessages.value = true
+                                }
+                                thirdPartyEmotesUpdated.emit(Unit)
+                                synchronized(autoCompleteList) {
+                                    autoCompleteList.addAll(emotes.filter { it !in autoCompleteList })
+                                }
+                                synchronized(allEmotes) {
+                                    allEmotes.addAll(emotes.filter { it.name !in allEmotes }.mapNotNull { it.name })
+                                }
+                                if (online) {
+                                    val directory = File(applicationContext.cacheDir, "emote_responses")
+                                    directory.mkdir()
+                                    val compressedStream = ByteArrayOutputStream()
+                                    DeflaterOutputStream(compressedStream).use {
+                                        it.write(response.toByteArray())
+                                    }
+                                    val compressedBytes = compressedStream.toByteArray()
+                                    FileOutputStream("${applicationContext.cacheDir}/emote_responses/global.stv").use {
+                                        it.write(compressedBytes)
                                     }
                                 }
                             }
                         } catch (e: Exception) {
-                            Log.e(TAG, "Failed to load global 7tv emotes", e)
+
                         }
                     }
                 }
             }
             if (!channelId.isNullOrBlank()) {
                 viewModelScope.launch {
+                    var response: String? = null
+                    var setId: String? = null
+                    var emotes: List<Emote>? = null
+                    var online = false
                     try {
-                        playerRepository.loadStvEmotes(networkLibrary, channelId, useWebp).let {
-                            if (it.second.isNotEmpty()) {
-                                channelStvEmoteSetId = it.first
-                                addEmotes(it.second)
-                                _channelStvEmotes.value = it.second
-                                if (!reloadMessages.value) {
-                                    reloadMessages.value = true
-                                }
+                        val userResponse = playerRepository.loadSTVUserResponse(networkLibrary, channelId)
+                        val user = playerRepository.loadSTVUser(userResponse, useWebp)
+                        val userSetId = user.first
+                        val userEmotes = user.second
+                        if (!userEmotes.isNullOrEmpty()) {
+                            response = userResponse
+                            setId = userSetId
+                            emotes = userEmotes
+                            online = true
+                        } else {
+                            if (!userSetId.isNullOrBlank()) {
+                                val emoteSetResponse = playerRepository.loadSTVEmoteSetResponse(networkLibrary, userSetId)
+                                val emoteSet = playerRepository.loadSTVEmoteSet(emoteSetResponse, useWebp, false)
+                                response = emoteSetResponse
+                                setId = userSetId
+                                emotes = emoteSet.second
+                                online = true
                             }
                         }
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed to load 7tv emotes for channel $channelId", e)
+                        try {
+                            val compressedBytes = FileInputStream("${applicationContext.cacheDir}/emote_responses/${channelId}.stv").use {
+                                it.readBytes()
+                            }
+                            val decompressedStream = ByteArrayOutputStream()
+                            InflaterOutputStream(decompressedStream).use {
+                                it.write(compressedBytes)
+                            }
+                            val savedResponse = decompressedStream.toByteArray().decodeToString()
+                            val user = playerRepository.loadSTVUser(savedResponse, useWebp)
+                            val userEmotes = user.second
+                            if (!userEmotes.isNullOrEmpty()) {
+                                setId = user.first
+                                emotes = userEmotes
+                            } else {
+                                val emoteSet = playerRepository.loadSTVEmoteSet(savedResponse, useWebp, false)
+                                setId = emoteSet.first
+                                emotes = emoteSet.second
+                            }
+                            response = savedResponse
+                            online = false
+                        } catch (e: Exception) {
+
+                        }
+                    }
+                    if (response != null) {
+                        try {
+                            if (!emotes.isNullOrEmpty()) {
+                                channelSTVEmoteSetId = setId
+                                synchronized(thirdPartyEmotes) {
+                                    thirdPartyEmotes.addAll(emotes)
+                                    thirdPartyEmotes.sortBy { it.source }
+                                }
+                                if (!reloadMessages.value) {
+                                    reloadMessages.value = true
+                                }
+                                thirdPartyEmotesUpdated.emit(Unit)
+                                synchronized(autoCompleteList) {
+                                    autoCompleteList.addAll(emotes.filter { it !in autoCompleteList })
+                                }
+                                synchronized(allEmotes) {
+                                    allEmotes.addAll(emotes.filter { it.name !in allEmotes }.mapNotNull { it.name })
+                                }
+                                if (online) {
+                                    val directory = File(applicationContext.cacheDir, "emote_responses")
+                                    directory.mkdir()
+                                    val files = directory.listFiles()
+                                    if (files != null && files.size >= 100) {
+                                        files.minBy { it.lastModified() }.delete()
+                                    }
+                                    val compressedStream = ByteArrayOutputStream()
+                                    DeflaterOutputStream(compressedStream).use {
+                                        it.write(response.toByteArray())
+                                    }
+                                    val compressedBytes = compressedStream.toByteArray()
+                                    FileOutputStream("${applicationContext.cacheDir}/emote_responses/${channelId}.stv").use {
+                                        it.write(compressedBytes)
+                                    }
+                                } else {
+                                    onMessage(ChatMessage(systemMsg = ContextCompat.getString(applicationContext, R.string.loaded_cached_stv_emotes)))
+                                }
+                            } else {
+                                if (online) {
+                                    File("${applicationContext.cacheDir}/emote_responses/${channelId}.stv").delete()
+                                }
+                            }
+                        } catch (e: Exception) {
+
+                        }
                     }
                 }
             }
         }
         if (applicationContext.prefs().getBoolean(C.CHAT_ENABLE_BTTV, true)) {
-            savedGlobalBttvEmotes.also { saved ->
-                if (!saved.isNullOrEmpty()) {
-                    addEmotes(saved)
-                    _globalBttvEmotes.value = saved
-                    if (!reloadMessages.value) {
-                        reloadMessages.value = true
-                    }
-                } else {
-                    viewModelScope.launch {
+            val saved = savedGlobalBTTVEmotes
+            if (!saved.isNullOrEmpty()) {
+                synchronized(thirdPartyEmotes) {
+                    thirdPartyEmotes.addAll(saved)
+                    thirdPartyEmotes.sortBy { it.source }
+                }
+                if (!reloadMessages.value) {
+                    reloadMessages.value = true
+                }
+                viewModelScope.launch {
+                    thirdPartyEmotesUpdated.emit(Unit)
+                }
+                synchronized(autoCompleteList) {
+                    autoCompleteList.addAll(saved.filter { it !in autoCompleteList })
+                }
+                synchronized(allEmotes) {
+                    allEmotes.addAll(saved.filter { it.name !in allEmotes }.mapNotNull { it.name })
+                }
+            } else {
+                viewModelScope.launch {
+                    val pair = try {
+                        playerRepository.loadGlobalBTTVEmotesResponse(networkLibrary) to true
+                    } catch (e: Exception) {
                         try {
-                            playerRepository.loadGlobalBttvEmotes(networkLibrary, useWebp).let { emotes ->
-                                if (emotes.isNotEmpty()) {
-                                    savedGlobalBttvEmotes = emotes
-                                    addEmotes(emotes)
-                                    _globalBttvEmotes.value = emotes
-                                    if (!reloadMessages.value) {
-                                        reloadMessages.value = true
+                            val compressedBytes = FileInputStream("${applicationContext.cacheDir}/emote_responses/global.bttv").use {
+                                it.readBytes()
+                            }
+                            val decompressedStream = ByteArrayOutputStream()
+                            InflaterOutputStream(decompressedStream).use {
+                                it.write(compressedBytes)
+                            }
+                            decompressedStream.toByteArray().decodeToString() to false
+                        } catch (e: Exception) {
+                            null to false
+                        }
+                    }
+                    val response = pair.first
+                    val online = pair.second
+                    if (response != null) {
+                        try {
+                            val emotes = playerRepository.loadGlobalBTTVEmotes(response, useWebp)
+                            if (emotes.isNotEmpty()) {
+                                savedGlobalBTTVEmotes = emotes
+                                synchronized(thirdPartyEmotes) {
+                                    thirdPartyEmotes.addAll(emotes)
+                                    thirdPartyEmotes.sortBy { it.source }
+                                }
+                                if (!reloadMessages.value) {
+                                    reloadMessages.value = true
+                                }
+                                thirdPartyEmotesUpdated.emit(Unit)
+                                synchronized(autoCompleteList) {
+                                    autoCompleteList.addAll(emotes.filter { it !in autoCompleteList })
+                                }
+                                synchronized(allEmotes) {
+                                    allEmotes.addAll(emotes.filter { it.name !in allEmotes }.mapNotNull { it.name })
+                                }
+                                if (online) {
+                                    val directory = File(applicationContext.cacheDir, "emote_responses")
+                                    directory.mkdir()
+                                    val compressedStream = ByteArrayOutputStream()
+                                    DeflaterOutputStream(compressedStream).use {
+                                        it.write(response.toByteArray())
                                     }
+                                    val compressedBytes = compressedStream.toByteArray()
+                                    FileOutputStream("${applicationContext.cacheDir}/emote_responses/global.bttv").use {
+                                        it.write(compressedBytes)
+                                    }
+                                } else {
+                                    onMessage(ChatMessage(systemMsg = ContextCompat.getString(applicationContext, R.string.loaded_cached_bttv_emotes)))
                                 }
                             }
                         } catch (e: Exception) {
-                            Log.e(TAG, "Failed to load global BTTV emotes", e)
+
                         }
                     }
                 }
             }
             if (!channelId.isNullOrBlank()) {
                 viewModelScope.launch {
-                    try {
-                        playerRepository.loadBttvEmotes(networkLibrary, channelId, useWebp).let {
-                            if (it.isNotEmpty()) {
-                                addEmotes(it)
-                                _channelBttvEmotes.value = it
+                    val pair = try {
+                        playerRepository.loadBTTVEmotesResponse(networkLibrary, channelId) to true
+                    } catch (e: Exception) {
+                        try {
+                            val compressedBytes = FileInputStream("${applicationContext.cacheDir}/emote_responses/${channelId}.bttv").use {
+                                it.readBytes()
+                            }
+                            val decompressedStream = ByteArrayOutputStream()
+                            InflaterOutputStream(decompressedStream).use {
+                                it.write(compressedBytes)
+                            }
+                            decompressedStream.toByteArray().decodeToString() to false
+                        } catch (e: Exception) {
+                            null to false
+                        }
+                    }
+                    val response = pair.first
+                    val online = pair.second
+                    if (response != null) {
+                        try {
+                            val emotes = playerRepository.loadBTTVEmotes(response, useWebp)
+                            if (emotes.isNotEmpty()) {
+                                synchronized(thirdPartyEmotes) {
+                                    thirdPartyEmotes.addAll(emotes)
+                                    thirdPartyEmotes.sortBy { it.source }
+                                }
                                 if (!reloadMessages.value) {
                                     reloadMessages.value = true
                                 }
+                                thirdPartyEmotesUpdated.emit(Unit)
+                                synchronized(autoCompleteList) {
+                                    autoCompleteList.addAll(emotes.filter { it !in autoCompleteList })
+                                }
+                                synchronized(allEmotes) {
+                                    allEmotes.addAll(emotes.filter { it.name !in allEmotes }.mapNotNull { it.name })
+                                }
+                                if (online) {
+                                    val directory = File(applicationContext.cacheDir, "emote_responses")
+                                    directory.mkdir()
+                                    val files = directory.listFiles()
+                                    if (files != null && files.size >= 100) {
+                                        files.minBy { it.lastModified() }.delete()
+                                    }
+                                    val compressedStream = ByteArrayOutputStream()
+                                    DeflaterOutputStream(compressedStream).use {
+                                        it.write(response.toByteArray())
+                                    }
+                                    val compressedBytes = compressedStream.toByteArray()
+                                    FileOutputStream("${applicationContext.cacheDir}/emote_responses/${channelId}.bttv").use {
+                                        it.write(compressedBytes)
+                                    }
+                                } else {
+                                    onMessage(ChatMessage(systemMsg = ContextCompat.getString(applicationContext, R.string.loaded_cached_ffz_emotes)))
+                                }
+                            } else {
+                                if (online) {
+                                    File("${applicationContext.cacheDir}/emote_responses/${channelId}.bttv").delete()
+                                }
                             }
+                        } catch (e: Exception) {
+
                         }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to load BTTV emotes for channel $channelId", e)
                     }
                 }
             }
         }
         if (applicationContext.prefs().getBoolean(C.CHAT_ENABLE_FFZ, true)) {
-            savedGlobalFfzEmotes.also { saved ->
-                if (!saved.isNullOrEmpty()) {
-                    addEmotes(saved)
-                    _globalFfzEmotes.value = saved
-                    if (!reloadMessages.value) {
-                        reloadMessages.value = true
-                    }
-                } else {
-                    viewModelScope.launch {
+            val saved = savedGlobalFFZEmotes
+            if (!saved.isNullOrEmpty()) {
+                synchronized(thirdPartyEmotes) {
+                    thirdPartyEmotes.addAll(saved)
+                    thirdPartyEmotes.sortBy { it.source }
+                }
+                if (!reloadMessages.value) {
+                    reloadMessages.value = true
+                }
+                viewModelScope.launch {
+                    thirdPartyEmotesUpdated.emit(Unit)
+                }
+                synchronized(autoCompleteList) {
+                    autoCompleteList.addAll(saved.filter { it !in autoCompleteList })
+                }
+                synchronized(allEmotes) {
+                    allEmotes.addAll(saved.filter { it.name !in allEmotes }.mapNotNull { it.name })
+                }
+            } else {
+                viewModelScope.launch {
+                    val pair = try {
+                        playerRepository.loadGlobalFFZEmotesResponse(networkLibrary) to true
+                    } catch (e: Exception) {
                         try {
-                            playerRepository.loadGlobalFfzEmotes(networkLibrary, useWebp).let { emotes ->
-                                if (emotes.isNotEmpty()) {
-                                    savedGlobalFfzEmotes = emotes
-                                    addEmotes(emotes)
-                                    _globalFfzEmotes.value = emotes
-                                    if (!reloadMessages.value) {
-                                        reloadMessages.value = true
+                            val compressedBytes = FileInputStream("${applicationContext.cacheDir}/emote_responses/global.ffz").use {
+                                it.readBytes()
+                            }
+                            val decompressedStream = ByteArrayOutputStream()
+                            InflaterOutputStream(decompressedStream).use {
+                                it.write(compressedBytes)
+                            }
+                            decompressedStream.toByteArray().decodeToString() to false
+                        } catch (e: Exception) {
+                            null to false
+                        }
+                    }
+                    val response = pair.first
+                    val online = pair.second
+                    if (response != null) {
+                        try {
+                            val emotes = playerRepository.loadGlobalFFZEmotes(response, useWebp)
+                            if (emotes.isNotEmpty()) {
+                                savedGlobalFFZEmotes = emotes
+                                synchronized(thirdPartyEmotes) {
+                                    thirdPartyEmotes.addAll(emotes)
+                                    thirdPartyEmotes.sortBy { it.source }
+                                }
+                                if (!reloadMessages.value) {
+                                    reloadMessages.value = true
+                                }
+                                thirdPartyEmotesUpdated.emit(Unit)
+                                synchronized(autoCompleteList) {
+                                    autoCompleteList.addAll(emotes.filter { it !in autoCompleteList })
+                                }
+                                synchronized(allEmotes) {
+                                    allEmotes.addAll(emotes.filter { it.name !in allEmotes }.mapNotNull { it.name })
+                                }
+                                if (online) {
+                                    val directory = File(applicationContext.cacheDir, "emote_responses")
+                                    directory.mkdir()
+                                    val compressedStream = ByteArrayOutputStream()
+                                    DeflaterOutputStream(compressedStream).use {
+                                        it.write(response.toByteArray())
+                                    }
+                                    val compressedBytes = compressedStream.toByteArray()
+                                    FileOutputStream("${applicationContext.cacheDir}/emote_responses/global.ffz").use {
+                                        it.write(compressedBytes)
                                     }
                                 }
                             }
                         } catch (e: Exception) {
-                            Log.e(TAG, "Failed to load global FFZ emotes", e)
+
                         }
                     }
                 }
             }
             if (!channelId.isNullOrBlank()) {
                 viewModelScope.launch {
-                    try {
-                        playerRepository.loadFfzEmotes(networkLibrary, channelId, useWebp).let {
-                            if (it.isNotEmpty()) {
-                                addEmotes(it)
-                                _channelFfzEmotes.value = it
+                    val pair = try {
+                        playerRepository.loadFFZEmotesResponse(networkLibrary, channelId) to true
+                    } catch (e: Exception) {
+                        try {
+                            val compressedBytes = FileInputStream("${applicationContext.cacheDir}/emote_responses/${channelId}.ffz").use {
+                                it.readBytes()
+                            }
+                            val decompressedStream = ByteArrayOutputStream()
+                            InflaterOutputStream(decompressedStream).use {
+                                it.write(compressedBytes)
+                            }
+                            decompressedStream.toByteArray().decodeToString() to false
+                        } catch (e: Exception) {
+                            null to false
+                        }
+                    }
+                    val response = pair.first
+                    val online = pair.second
+                    if (response != null) {
+                        try {
+                            val emotes = playerRepository.loadFFZEmotes(response, useWebp)
+                            if (emotes.isNotEmpty()) {
+                                synchronized(thirdPartyEmotes) {
+                                    thirdPartyEmotes.addAll(emotes)
+                                    thirdPartyEmotes.sortBy { it.source }
+                                }
                                 if (!reloadMessages.value) {
                                     reloadMessages.value = true
                                 }
+                                thirdPartyEmotesUpdated.emit(Unit)
+                                synchronized(autoCompleteList) {
+                                    autoCompleteList.addAll(emotes.filter { it !in autoCompleteList })
+                                }
+                                synchronized(allEmotes) {
+                                    allEmotes.addAll(emotes.filter { it.name !in allEmotes }.mapNotNull { it.name })
+                                }
+                                if (online) {
+                                    val directory = File(applicationContext.cacheDir, "emote_responses")
+                                    directory.mkdir()
+                                    val files = directory.listFiles()
+                                    if (files != null && files.size >= 100) {
+                                        files.minBy { it.lastModified() }.delete()
+                                    }
+                                    val compressedStream = ByteArrayOutputStream()
+                                    DeflaterOutputStream(compressedStream).use {
+                                        it.write(response.toByteArray())
+                                    }
+                                    val compressedBytes = compressedStream.toByteArray()
+                                    FileOutputStream("${applicationContext.cacheDir}/emote_responses/${channelId}.ffz").use {
+                                        it.write(compressedBytes)
+                                    }
+                                }
+                            } else {
+                                if (online) {
+                                    File("${applicationContext.cacheDir}/emote_responses/${channelId}.ffz").delete()
+                                }
                             }
+                        } catch (e: Exception) {
+
                         }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to load FFZ emotes for channel $channelId", e)
                     }
                 }
             }
@@ -416,35 +724,37 @@ class ChatViewModel @Inject constructor(
         if (!channelId.isNullOrBlank() || !channelLogin.isNullOrBlank()) {
             viewModelScope.launch {
                 try {
-                    playerRepository.loadChannelBadges(networkLibrary, helixHeaders, gqlHeaders, channelId, channelLogin, emoteQuality, enableIntegrity).let {
-                        if (it.isNotEmpty()) {
-                            _channelBadges.value = it
-                            if (!reloadMessages.value) {
-                                reloadMessages.value = true
-                            }
+                    val badges = playerRepository.loadChannelBadges(networkLibrary, helixHeaders, gqlHeaders, channelId, channelLogin, emoteQuality, enableIntegrity)
+                    if (badges.isNotEmpty()) {
+                        synchronized(channelBadges) {
+                            channelBadges.clear()
+                            channelBadges.addAll(badges)
+                        }
+                        if (!reloadMessages.value) {
+                            reloadMessages.value = true
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to load badges for channel $channelId", e)
-                    if (e.message == "failed integrity check" && integrity.value == null) {
-                        integrity.value = "refresh"
+                    if (e.message == C.FAILED_INTEGRITY_CHECK) {
+                        integrity.emit("refresh")
                     }
                 }
             }
             viewModelScope.launch {
                 try {
-                    playerRepository.loadCheerEmotes(networkLibrary, helixHeaders, gqlHeaders, channelId, channelLogin, animateGifs, enableIntegrity).let {
-                        if (it.isNotEmpty()) {
-                            _cheerEmotes.value = it
-                            if (!reloadMessages.value) {
-                                reloadMessages.value = true
-                            }
+                    val emotes = playerRepository.loadCheerEmotes(networkLibrary, helixHeaders, gqlHeaders, channelId, channelLogin, animateGifs, enableIntegrity)
+                    if (emotes.isNotEmpty()) {
+                        synchronized(cheerEmotes) {
+                            cheerEmotes.clear()
+                            cheerEmotes.addAll(emotes)
+                        }
+                        if (!reloadMessages.value) {
+                            reloadMessages.value = true
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to load cheermotes for channel $channelId", e)
-                    if (e.message == "failed integrity check" && integrity.value == null) {
-                        integrity.value = "refresh"
+                    if (e.message == C.FAILED_INTEGRITY_CHECK) {
+                        integrity.emit("refresh")
                     }
                 }
             }
@@ -452,10 +762,12 @@ class ChatViewModel @Inject constructor(
     }
 
     private fun loadUserEmotes(channelId: String?) {
-        savedUserEmotes.also { saved ->
-            if (!saved.isNullOrEmpty()) {
-                addEmotes(
-                    saved.map {
+        val saved = savedUserEmotes
+        if (!saved.isNullOrEmpty()) {
+            synchronized(userEmotes) {
+                userEmotes.clear()
+                userEmotes.addAll(
+                    saved.sortedByDescending { it.ownerId == channelId }.map {
                         Emote(
                             name = it.name,
                             url1x = it.url1x,
@@ -466,7 +778,12 @@ class ChatViewModel @Inject constructor(
                         )
                     }
                 )
-                _userEmotes.value = saved.sortedByDescending { it.ownerId == channelId }.map {
+            }
+            viewModelScope.launch {
+                userEmotesUpdated.emit(Unit)
+            }
+            synchronized(autoCompleteList) {
+                autoCompleteList.addAll(saved.map {
                     Emote(
                         name = it.name,
                         url1x = it.url1x,
@@ -475,33 +792,28 @@ class ChatViewModel @Inject constructor(
                         url4x = it.url4x,
                         format = it.format
                     )
-                }
-            } else {
-                val helixHeaders = TwitchApiHelper.getHelixHeaders(applicationContext)
-                val gqlHeaders = TwitchApiHelper.getGQLHeaders(applicationContext, true)
-                if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank() || !helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                    viewModelScope.launch {
-                        try {
-                            val networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, "OkHttp")
-                            val accountId = applicationContext.tokenPrefs().getString(C.USER_ID, null)
-                            val animateGifs =  applicationContext.prefs().getBoolean(C.ANIMATED_EMOTES, true)
-                            val enableIntegrity = applicationContext.prefs().getBoolean(C.ENABLE_INTEGRITY, false)
-                            playerRepository.loadUserEmotes(networkLibrary, helixHeaders, gqlHeaders, channelId, accountId, animateGifs, enableIntegrity).let { emotes ->
-                                if (emotes.isNotEmpty()) {
-                                    val sorted = emotes.sortedByDescending { it.setId }
-                                    addEmotes(
-                                        sorted.map {
-                                            Emote(
-                                                name = it.name,
-                                                url1x = it.url1x,
-                                                url2x = it.url2x,
-                                                url3x = it.url3x,
-                                                url4x = it.url4x,
-                                                format = it.format
-                                            )
-                                        }
-                                    )
-                                    _userEmotes.value = sorted.sortedByDescending { it.ownerId == channelId }.map {
+                }.filter { it !in autoCompleteList })
+            }
+            synchronized(allEmotes) {
+                allEmotes.addAll(saved.filter { it.name !in allEmotes }.mapNotNull { it.name })
+            }
+        } else {
+            val helixHeaders = TwitchApiHelper.getHelixHeaders(applicationContext)
+            val gqlHeaders = TwitchApiHelper.getGQLHeaders(applicationContext, true)
+            if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank() || !helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                viewModelScope.launch {
+                    try {
+                        val networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP)
+                        val accountId = applicationContext.tokenPrefs().getString(C.USER_ID, null)
+                        val animateGifs =  applicationContext.prefs().getBoolean(C.ANIMATED_EMOTES, true)
+                        val enableIntegrity = applicationContext.prefs().getBoolean(C.ENABLE_INTEGRITY, false)
+                        val emotes = playerRepository.loadUserEmotes(networkLibrary, helixHeaders, gqlHeaders, channelId, accountId, animateGifs, enableIntegrity)
+                        if (emotes.isNotEmpty()) {
+                            val sorted = emotes.sortedByDescending { it.setId }
+                            synchronized(userEmotes) {
+                                userEmotes.clear()
+                                userEmotes.addAll(
+                                    sorted.sortedByDescending { it.ownerId == channelId }.map {
                                         Emote(
                                             name = it.name,
                                             url1x = it.url1x,
@@ -511,14 +823,29 @@ class ChatViewModel @Inject constructor(
                                             format = it.format
                                         )
                                     }
-                                    loadedUserEmotes = true
-                                }
+                                )
                             }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Failed to load user emotes", e)
-                            if (e.message == "failed integrity check" && integrity.value == null) {
-                                integrity.value = "refresh"
+                            userEmotesUpdated.emit(Unit)
+                            synchronized(autoCompleteList) {
+                                autoCompleteList.addAll(sorted.map {
+                                    Emote(
+                                        name = it.name,
+                                        url1x = it.url1x,
+                                        url2x = it.url2x,
+                                        url3x = it.url3x,
+                                        url4x = it.url4x,
+                                        format = it.format
+                                    )
+                                }.filter { it !in autoCompleteList })
                             }
+                            synchronized(allEmotes) {
+                                allEmotes.addAll(sorted.filter { it.name !in allEmotes }.mapNotNull { it.name })
+                            }
+                            loadedUserEmotes = true
+                        }
+                    } catch (e: Exception) {
+                        if (e.message == C.FAILED_INTEGRITY_CHECK) {
+                            integrity.emit("refresh")
                         }
                     }
                 }
@@ -547,67 +874,89 @@ class ChatViewModel @Inject constructor(
 
     fun reloadEmotes(channelId: String?, channelLogin: String?) {
         savedGlobalBadges = null
-        savedGlobalStvEmotes = null
-        savedGlobalBttvEmotes = null
-        savedGlobalFfzEmotes = null
+        savedGlobalSTVEmotes = null
+        savedGlobalBTTVEmotes = null
+        savedGlobalFFZEmotes = null
         loadEmotes(channelId, channelLogin)
     }
 
-    fun loadRecentMessages(networkLibrary: String?, channelLogin: String) {
-        viewModelScope.launch {
-            try {
-                val list = mutableListOf<ChatMessage>()
-                playerRepository.loadRecentMessages(networkLibrary, channelLogin, applicationContext.prefs().getInt(C.CHAT_RECENT_LIMIT, 100).toString()).messages.forEach { message ->
-                    when {
-                        message.contains("PRIVMSG") -> RecentMessageUtils.parseChatMessage(message, false)
-                        message.contains("USERNOTICE") -> {
-                            if (applicationContext.prefs().getBoolean(C.CHAT_SHOW_USERNOTICE, true)) {
-                                RecentMessageUtils.parseChatMessage(message, true)
-                            } else null
+    fun loadRecentMessages(networkLibrary: String?, recentMessagesUrl: String?, channelLogin: String) {
+        if (!recentMessagesUrl.isNullOrBlank()) {
+            viewModelScope.launch {
+                try {
+                    val list = mutableListOf<ChatMessage>()
+                    playerRepository.loadRecentMessages(networkLibrary, recentMessagesUrl, channelLogin, applicationContext.prefs().getInt(C.CHAT_RECENT_LIMIT, 100).toString()).messages.forEach { message ->
+                        val ircMessage = ChatUtils.parseIRCMessage(message)
+                        when (ircMessage.command) {
+                            "PRIVMSG" -> ChatUtils.parseChatMessage(ircMessage)
+                            "USERNOTICE" -> {
+                                if (applicationContext.prefs().getBoolean(C.CHAT_SHOW_USER_NOTICE, true)) {
+                                    ChatUtils.parseChatMessage(ircMessage)
+                                } else null
+                            }
+                            "CLEARMSG" -> {
+                                if (applicationContext.prefs().getBoolean(C.CHAT_SHOW_CLEAR_MSG, true)) {
+                                    val chatMessage = ChatUtils.parseClearMessage(ircMessage)
+                                    val deletedMessage = chatMessage.targetMsgId?.let { targetId ->
+                                        list.find { it.id == targetId }
+                                    }
+                                    getClearMessage(chatMessage, deletedMessage, applicationContext.prefs().getString(C.UI_NAME_DISPLAY, "0"))
+                                } else null
+                            }
+                            "CLEARCHAT" -> {
+                                if (applicationContext.prefs().getBoolean(C.CHAT_SHOW_CLEAR_CHAT, true)) {
+                                    ChatUtils.parseClearChat(applicationContext, ircMessage)
+                                } else null
+                            }
+                            "NOTICE" -> ChatUtils.parseNotice(ircMessage)
+                            else -> null
+                        }?.let {
+                            if (it.reply?.message != null) {
+                                list.add(ChatMessage(
+                                    type = ChatMessage.REPLY_MESSAGE,
+                                    reply = it.reply,
+                                    replyParent = it,
+                                ))
+                            }
+                            list.add(it)
                         }
-                        message.contains("CLEARMSG") -> {
-                            if (applicationContext.prefs().getBoolean(C.CHAT_SHOW_CLEARMSG, true)) {
-                                val pair = RecentMessageUtils.parseClearMessage(message)
-                                val deletedMessage = pair.second?.let { targetId -> list.find { it.id == targetId } }
-                                getClearMessage(pair.first, deletedMessage, applicationContext.prefs().getString(C.UI_NAME_DISPLAY, "0"))
-                            } else null
-                        }
-                        message.contains("CLEARCHAT") -> {
-                            if (applicationContext.prefs().getBoolean(C.CHAT_SHOW_CLEARCHAT, true)) {
-                                RecentMessageUtils.parseClearChat(applicationContext, message)
-                            } else null
-                        }
-                        message.contains("NOTICE") -> RecentMessageUtils.parseNotice(applicationContext, message)
-                        else -> null
-                    }?.let {
-                        if (it.reply?.message != null) {
-                            list.add(ChatMessage(
-                                reply = it.reply,
-                                isReply = true,
-                                replyParent = it,
-                            ))
-                        }
-                        list.add(it)
                     }
+                    if (list.isNotEmpty()) {
+                        synchronized(chatMessages) {
+                            val left = messageLimit - chatMessages.size
+                            if (left > 0) {
+                                val items = list.takeLast(left)
+                                chatMessages.addAll(0, items)
+                                Pair(items, chatMessages.lastIndex)
+                            } else null
+                        }.let {
+                            if (it != null) {
+                                addMessages.emit(it)
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+
                 }
-                if (list.isNotEmpty()) {
-                    _chatMessages.value = arrayListOf<ChatMessage>().apply {
-                        addAll(list)
-                        addAll(_chatMessages.value.toList())
-                    }
-                    if (!scrollDown.value) {
-                        scrollDown.value = true
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to load recent messages for channel $channelLogin", e)
             }
         }
     }
 
     fun checkTranslateAllMessages(id: String) {
         viewModelScope.launch {
-            translateAllMessages.value = translateAllMessagesUsersRepository.getByUserId(id) != null
+            translateAllMessages.value = playerRepository.getTranslatedChannel(id) != null
+        }
+    }
+
+    fun saveTranslatedChannel(channelId: String) {
+        viewModelScope.launch {
+            playerRepository.saveTranslatedChannel(TranslatedChannel(channelId))
+        }
+    }
+
+    fun deleteTranslatedChannel(channelId: String) {
+        viewModelScope.launch {
+            playerRepository.deleteTranslatedChannel(TranslatedChannel(channelId))
         }
     }
 
@@ -625,6 +974,7 @@ class ChatViewModel @Inject constructor(
         val message = ContextCompat.getString(applicationContext, R.string.chat_clearmsg).format(userName, deletedMessage?.message ?: chatMessage.message)
         val messageIndex = message.indexOf(": ") + 2
         return ChatMessage(
+            type = ChatMessage.USER_MESSAGE,
             userId = deletedMessage?.userId,
             userLogin = login,
             userName = deletedMessage?.userName,
@@ -641,232 +991,493 @@ class ChatViewModel @Inject constructor(
         )
     }
 
-    private fun onMessage(message: ChatMessage) {
-        _chatMessages.value.add(message)
-        newMessage.value = message
+    suspend fun onMessage(message: ChatMessage) {
+        synchronized(chatMessages) {
+            chatMessages.add(message)
+            val removeCount = if (chatMessages.size > messageLimit) {
+                chatMessages.size - messageLimit
+            } else 0
+            if (newMessage.subscriptionCount.value > 0) {
+                Triple(message, chatMessages.lastIndex, removeCount)
+            } else {
+                if (removeCount > 0) {
+                    repeat(removeCount) {
+                        chatMessages.removeAt(0)
+                    }
+                }
+                null
+            }
+        }?.let {
+            newMessage.emit(it)
+        }
     }
 
     fun startLiveChat(channelId: String?, channelLogin: String) {
         stopLiveChat()
+        started = true
         val gqlHeaders = TwitchApiHelper.getGQLHeaders(applicationContext, true)
         val helixHeaders = TwitchApiHelper.getHelixHeaders(applicationContext)
-        val networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, "OkHttp")
+        val networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP)
         val enableIntegrity = applicationContext.prefs().getBoolean(C.ENABLE_INTEGRITY, false)
         val accountId = applicationContext.tokenPrefs().getString(C.USER_ID, null)
         val accountLogin = applicationContext.tokenPrefs().getString(C.USERNAME, null)
         val isLoggedIn = !accountLogin.isNullOrBlank() && (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank() || !helixHeaders[C.HEADER_TOKEN].isNullOrBlank())
-        val usePubSub = applicationContext.prefs().getBoolean(C.CHAT_PUBSUB_ENABLED, true)
-        val showUserNotice = applicationContext.prefs().getBoolean(C.CHAT_SHOW_USERNOTICE, true)
-        val showClearMsg = applicationContext.prefs().getBoolean(C.CHAT_SHOW_CLEARMSG, true)
-        val showClearChat = applicationContext.prefs().getBoolean(C.CHAT_SHOW_CLEARCHAT, true)
+        val usePubSub = applicationContext.prefs().getBoolean(C.CHAT_PUB_SUB_ENABLED, true)
+        val showUserNotice = applicationContext.prefs().getBoolean(C.CHAT_SHOW_USER_NOTICE, true)
+        val showClearMsg = applicationContext.prefs().getBoolean(C.CHAT_SHOW_CLEAR_MSG, true)
+        val showClearChat = applicationContext.prefs().getBoolean(C.CHAT_SHOW_CLEAR_CHAT, true)
         val nameDisplay = applicationContext.prefs().getString(C.UI_NAME_DISPLAY, "0")
         val useApiChatMessages = applicationContext.prefs().getBoolean(C.DEBUG_API_CHAT_MESSAGES, true)
-        val useCustomWebSockets = applicationContext.prefs().getBoolean(C.DEBUG_USE_CUSTOM_WEBSOCKETS, false)
         val showWebSocketDebugInfo = applicationContext.prefs().getBoolean(C.DEBUG_WEBSOCKET_INFO, false)
-        if (applicationContext.prefs().getBoolean(C.DEBUG_EVENTSUB_CHAT, false) && !helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-            val onWelcomeMessage: (String) -> Unit = { sessionId ->
-                listOf(
-                    "channel.chat.clear",
-                    "channel.chat.message",
-                    "channel.chat.notification",
-                    "channel.chat_settings.update",
-                ).forEach {
-                    viewModelScope.launch {
-                        try {
-                            helixRepository.createEventSubSubscription(networkLibrary, helixHeaders, accountId, channelId, it, sessionId)?.let {
-                                onMessage(ChatMessage(systemMsg = it))
-                            }
-                        } catch (e: Exception) {
-
-                        }
-                    }
-                }
-            }
-            val onChatMessage: (JSONObject, String?) -> Unit = { json, timestamp ->
-                val chatMessage = EventSubUtils.parseChatMessage(json, timestamp)
-                if (usePubSub && chatMessage.reward != null && !chatMessage.reward.id.isNullOrBlank()) {
-                    onRewardMessage(chatMessage, networkLibrary, isLoggedIn, accountId, channelId)
-                } else {
-                    onChatMessage(chatMessage, networkLibrary, isLoggedIn, accountId, channelId)
-                }
-            }
-            val onUserNotice: (JSONObject, String?) -> Unit = { json, timestamp ->
-                if (showUserNotice) {
-                    onChatMessage(EventSubUtils.parseUserNotice(json, timestamp), networkLibrary, isLoggedIn, accountId, channelId)
-                }
-            }
-            val onClearChat: (JSONObject, String?) -> Unit = { json, timestamp ->
-                if (showClearChat) {
-                    onMessage(EventSubUtils.parseClearChat(applicationContext, json, timestamp))
-                }
-            }
-            val onRoomState: (JSONObject, String?) -> Unit = { json, timestamp ->
-                roomState.value = EventSubUtils.parseRoomState(json)
-            }
-            if (useCustomWebSockets) {
-                eventSub = EventSubWebSocket(
-                    onConnect = { onConnect(channelLogin) },
-                    onDisconnect = { message, fullMsg -> onDisconnect(channelLogin, message, fullMsg) },
-                    onWelcomeMessage = onWelcomeMessage,
-                    onChatMessage = onChatMessage,
-                    onUserNotice = onUserNotice,
-                    onClearChat = onClearChat,
-                    onRoomState = onRoomState,
-                    trustManager = trustManager,
-                    coroutineScope = viewModelScope,
-                ).apply { connect() }
-            } else {
-                eventSubOkHttp = EventSubWebSocketOkHttp(
-                    client = okHttpClient,
-                    onConnect = { onConnect(channelLogin) },
-                    onWelcomeMessage = onWelcomeMessage,
-                    onChatMessage = onChatMessage,
-                    onUserNotice = onUserNotice,
-                    onClearChat = onClearChat,
-                    onRoomState = onRoomState,
-                ).apply { connect() }
-            }
+        if (applicationContext.prefs().getBoolean(C.DEBUG_EVENT_SUB_CHAT, false) && !helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+            eventSub = EventSubWebSocket(trustManager, EventSubListener(helixHeaders, channelLogin, showUserNotice, showClearChat, usePubSub, networkLibrary, isLoggedIn, accountId, channelId))
+            chatReadJob = eventSub?.connect(viewModelScope)
         } else {
             val gqlToken = gqlHeaders[C.HEADER_TOKEN]?.removePrefix("OAuth ")
             val helixToken = helixHeaders[C.HEADER_TOKEN]?.removePrefix("Bearer ")
-            if (applicationContext.prefs().getBoolean(C.CHAT_USE_WEBSOCKET, false)) {
-                if (useCustomWebSockets) {
-                    chatReadWebSocket = ChatReadWebSocket(
-                        loggedIn = isLoggedIn,
-                        channelName = channelLogin,
-                        onConnect = { onConnect(channelLogin) },
-                        onDisconnect = { message, fullMsg -> onDisconnect(channelLogin, message, fullMsg) },
-                        onChatMessage = { message, fullMsg -> onChatMessage(message, fullMsg, showUserNotice, usePubSub, networkLibrary, isLoggedIn, accountId, channelId) },
-                        onClearMessage = { if (showClearMsg) { onClearMessage(it, nameDisplay) } },
-                        onClearChat = { if (showClearChat) { onClearChat(it) } },
-                        onNotice = { onNotice(it) },
-                        onRoomState = { onRoomState(it) },
-                        trustManager = trustManager,
-                        coroutineScope = viewModelScope,
-                    ).apply { connect() }
-                } else {
-                    chatReadWebSocketOkHttp = ChatReadWebSocketOkHttp(
-                        loggedIn = isLoggedIn,
-                        channelName = channelLogin,
-                        client = okHttpClient,
-                        onConnect = { onConnect(channelLogin) },
-                        onDisconnect = { message, fullMsg -> onDisconnect(channelLogin, message, fullMsg) },
-                        onChatMessage = { message, fullMsg -> onChatMessage(message, fullMsg, showUserNotice, usePubSub, networkLibrary, isLoggedIn, accountId, channelId) },
-                        onClearMessage = { if (showClearMsg) { onClearMessage(it, nameDisplay) } },
-                        onClearChat = { if (showClearChat) { onClearChat(it) } },
-                        onNotice = { onNotice(it) },
-                        onRoomState = { onRoomState(it) }
-                    ).apply { connect() }
-                }
+            if (applicationContext.prefs().getBoolean(C.CHAT_USE_WEBSOCKET, true)) {
+                chatReadWebSocket = ChatReadWebSocket(channelLogin, applicationContext.prefs().getBoolean(C.CHAT_SHOW_GIF_MESSAGES, true), trustManager, ChatReadListener(channelLogin, nameDisplay, showUserNotice, showClearMsg, showClearChat, usePubSub, networkLibrary, isLoggedIn, accountId, channelId))
+                chatReadJob = chatReadWebSocket?.connect(viewModelScope)
                 if (isLoggedIn && (!gqlToken.isNullOrBlank() || !helixHeaders[C.HEADER_TOKEN].isNullOrBlank() && !useApiChatMessages)) {
-                    if (useCustomWebSockets) {
-                        chatWriteWebSocket = ChatWriteWebSocket(
-                            userLogin = accountLogin,
-                            userToken = gqlToken?.takeIf { it.isNotBlank() } ?: helixToken,
-                            channelName = channelLogin,
-                            onConnect = {
-                                if (showWebSocketDebugInfo) {
-                                    onConnectWebSocket("Chat write socket")
-                                }
-                            },
-                            onDisconnect = { message, fullMsg ->
-                                if (showWebSocketDebugInfo) {
-                                    onDisconnectWebSocket("Chat write socket", message, fullMsg)
-                                }
-                            },
-                            onNotice = { onNotice(it) },
-                            onUserState = { onUserState(it, channelId) },
-                            trustManager = trustManager,
-                            coroutineScope = viewModelScope,
-                        ).apply { connect() }
-                    } else {
-                        chatWriteWebSocketOkHttp = ChatWriteWebSocketOkHttp(
-                            userLogin = accountLogin,
-                            userToken = gqlToken?.takeIf { it.isNotBlank() } ?: helixToken,
-                            channelName = channelLogin,
-                            client = okHttpClient,
-                            onNotice = { onNotice(it) },
-                            onUserState = { onUserState(it, channelId) }
-                        ).apply { connect() }
-                    }
+                    chatWriteWebSocket = ChatWriteWebSocket(
+                        userLogin = accountLogin,
+                        userToken = gqlToken?.takeIf { it.isNotBlank() } ?: helixToken,
+                        channelLogin = channelLogin,
+                        trustManager = trustManager,
+                        listener = ChatWriteListener(channelId, showWebSocketDebugInfo)
+                    )
+                    chatWriteJob = chatWriteWebSocket?.connect(viewModelScope)
                 }
             } else {
                 val useSSL = applicationContext.prefs().getBoolean(C.CHAT_USE_SSL, true)
-                chatReadIRC = ChatReadIRC(
-                    useSSL = useSSL,
-                    loggedIn = isLoggedIn,
-                    channelName = channelLogin,
-                    onConnect = { onConnect(channelLogin) },
-                    onDisconnect = { message, fullMsg -> onDisconnect(channelLogin, message, fullMsg) },
-                    onChatMessage = { message, fullMsg -> onChatMessage(message, fullMsg, showUserNotice, usePubSub, networkLibrary, isLoggedIn, accountId, channelId) },
-                    onClearMessage = { if (showClearMsg) { onClearMessage(it, nameDisplay) } },
-                    onClearChat = { if (showClearChat) { onClearChat(it) } },
-                    onNotice = { onNotice(it) },
-                    onRoomState = { onRoomState(it) }
-                ).apply { start() }
+                chatReadIRCSocket = ChatReadIRCSocket(useSSL, channelLogin, trustManager, ChatReadListener(channelLogin, nameDisplay, showUserNotice, showClearMsg, showClearChat, usePubSub, networkLibrary, isLoggedIn, accountId, channelId))
+                chatReadJob = viewModelScope.launch(Dispatchers.IO) {
+                    chatReadIRCSocket?.start()
+                }
                 if (isLoggedIn && (!gqlToken.isNullOrBlank() || !helixHeaders[C.HEADER_TOKEN].isNullOrBlank() && !useApiChatMessages)) {
-                    chatWriteIRC = ChatWriteIRC(
+                    chatWriteIRCSocket = ChatWriteIRCSocket(
                         useSSL = useSSL,
                         userLogin = accountLogin,
                         userToken = gqlToken?.takeIf { it.isNotBlank() } ?: helixToken,
-                        channelName = channelLogin,
-                        onSendMessageError = { message, fullMsg -> onSendMessageError(message, fullMsg) },
-                        onNotice = { onNotice(it) },
-                        onUserState = { onUserState(it, channelId) }
-                    ).apply { start() }
+                        channelLogin = channelLogin,
+                        trustManager = trustManager,
+                        listener = ChatWriteListener(channelId, showWebSocketDebugInfo)
+                    )
+                    chatWriteJob = viewModelScope.launch(Dispatchers.IO) {
+                        chatWriteIRCSocket?.start()
+                    }
                 }
             }
         }
         if (usePubSub && !channelId.isNullOrBlank()) {
             val collectPoints = applicationContext.prefs().getBoolean(C.CHAT_POINTS_COLLECT, true)
-            val onPlaybackMessage: (JSONObject) -> Unit = { message ->
-                val playbackMessage = PubSubUtils.parsePlaybackMessage(message)
-                if (playbackMessage != null) {
-                    playbackMessage.live?.let {
-                        if (it) {
-                            onMessage(ChatMessage(systemMsg = ContextCompat.getString(applicationContext, R.string.stream_live).format(channelLogin)))
-                        } else {
-                            onMessage(ChatMessage(systemMsg = ContextCompat.getString(applicationContext, R.string.stream_offline).format(channelLogin)))
-                        }
+            val gqlWebClientId = applicationContext.prefs().getString(C.GQL_CLIENT_ID_WEB, "kimne78kx3ncx6brgo4mv6wki5h1ko")
+            val gqlWebToken = applicationContext.tokenPrefs().getString(C.GQL_TOKEN_WEB, null)
+            val notifyPoints = applicationContext.prefs().getBoolean(C.CHAT_POINTS_NOTIFY, false)
+            val showRaids = applicationContext.prefs().getBoolean(C.CHAT_RAIDS_SHOW, true)
+            val showPolls = applicationContext.prefs().getBoolean(C.CHAT_POLLS_SHOW, true)
+            val showPredictions = applicationContext.prefs().getBoolean(C.CHAT_PREDICTIONS_SHOW, true)
+            hermesWebSocket = HermesWebSocket(
+                channelId = channelId,
+                userId = accountId,
+                gqlClientId = if (enableIntegrity) {
+                    gqlHeaders[C.HEADER_CLIENT_ID]
+                } else {
+                    gqlWebClientId
+                },
+                gqlToken = if (enableIntegrity) {
+                    gqlHeaders[C.HEADER_TOKEN]?.removePrefix("OAuth ")
+                } else {
+                    if (!gqlWebToken.isNullOrBlank()) {
+                        gqlWebToken
+                    } else null
+                },
+                collectPoints = collectPoints,
+                showRaids = applicationContext.prefs().getBoolean(C.CHAT_RAIDS_SHOW, true),
+                showPolls = applicationContext.prefs().getBoolean(C.CHAT_POLLS_SHOW, true),
+                showPredictions = applicationContext.prefs().getBoolean(C.CHAT_PREDICTIONS_SHOW, true),
+                trustManager = trustManager,
+                listener = PubSubListener(channelLogin, collectPoints, notifyPoints, showRaids, showPolls, showPredictions, networkLibrary, gqlHeaders, isLoggedIn, accountId, channelId, enableIntegrity, showWebSocketDebugInfo)
+            )
+            pubSubJob = hermesWebSocket?.connect(viewModelScope)
+        }
+        val showNamePaints = applicationContext.prefs().getBoolean(C.CHAT_SHOW_PAINTS, true)
+        val showSTVBadges = applicationContext.prefs().getBoolean(C.CHAT_SHOW_STV_BADGES, true)
+        val showPersonalEmotes = applicationContext.prefs().getBoolean(C.CHAT_SHOW_PERSONAL_EMOTES, true)
+        val stvLiveUpdates = applicationContext.prefs().getBoolean(C.CHAT_STV_LIVE_UPDATES, true)
+        if ((showNamePaints || showSTVBadges || showPersonalEmotes || stvLiveUpdates) && !channelId.isNullOrBlank()) {
+            val useWebp = applicationContext.prefs().getBoolean(C.CHAT_USE_WEBP, true)
+            stvEventApi = STVEventApiWebSocket(
+                channelId = channelId,
+                trustManager = trustManager,
+                listener = STVEventApiListener(useWebp, showNamePaints, showSTVBadges, showPersonalEmotes, stvLiveUpdates, networkLibrary, isLoggedIn, accountId, channelId, showWebSocketDebugInfo)
+            )
+            stvEventApiJob = stvEventApi?.connect(viewModelScope)
+            if (isLoggedIn && !accountId.isNullOrBlank()) {
+                viewModelScope.launch {
+                    try {
+                        stvUserId = playerRepository.getSTVUser(networkLibrary, accountId).takeIf { !it.isNullOrBlank() }
+                    } catch (e: Exception) {
+
                     }
-                    _playbackMessage.value = playbackMessage
                 }
             }
-            val onStreamInfo: (JSONObject) -> Unit = { message ->
-                _streamInfo.value = PubSubUtils.parseStreamInfo(message)
+        }
+    }
+
+    fun stopLiveChat() {
+        if (started) {
+            started = false
+            if (chatReadIRCSocket != null) {
+                MainScope().launch(Dispatchers.IO) {
+                    chatReadIRCSocket?.disconnect(chatReadJob)
+                }
+            } else {
+                if (chatReadWebSocket != null) {
+                    MainScope().launch(Dispatchers.IO) {
+                        chatReadWebSocket?.disconnect(chatReadJob)
+                    }
+                } else {
+                    if (eventSub != null) {
+                        MainScope().launch(Dispatchers.IO) {
+                            eventSub?.disconnect(chatReadJob)
+                        }
+                    }
+                }
             }
-            val onRewardMessage: (JSONObject) -> Unit = { message ->
-                val chatMessage = PubSubUtils.parseRewardMessage(message)
-                if (!chatMessage.message.isNullOrBlank()) {
+            if (chatWriteIRCSocket != null) {
+                MainScope().launch(Dispatchers.IO) {
+                    chatWriteIRCSocket?.disconnect(chatWriteJob)
+                }
+            } else {
+                if (chatWriteWebSocket != null) {
+                    MainScope().launch(Dispatchers.IO) {
+                        chatWriteWebSocket?.disconnect(chatWriteJob)
+                    }
+                }
+            }
+            if (hermesWebSocket != null) {
+                MainScope().launch(Dispatchers.IO) {
+                    hermesWebSocket?.disconnect(pubSubJob)
+                }
+            }
+            if (stvEventApi != null) {
+                MainScope().launch(Dispatchers.IO) {
+                    stvEventApi?.disconnect(stvEventApiJob)
+                }
+            }
+        }
+    }
+
+    fun isActive(): Boolean? {
+        return chatReadJob?.isActive
+    }
+
+    fun disconnect() {
+        stopLiveChat()
+        usedRaidId = null
+        raidClosed = true
+        usedPollId = null
+        pollClosed = true
+        pollSecondsLeft.value = null
+        pollTimer?.cancel()
+        usedPredictionId = null
+        predictionClosed = true
+        predictionSecondsLeft.value = null
+        predictionTimer?.cancel()
+        viewModelScope.launch {
+            synchronized(chatMessages) {
+                val size = chatMessages.size
+                chatMessages.clear()
+                size
+            }.let {
+                removeMessages.emit(it)
+            }
+            onMessage(ChatMessage(systemMsg = ContextCompat.getString(applicationContext, R.string.disconnected)))
+        }
+        if (!hideRaid.value) {
+            hideRaid.value = true
+        }
+        if (!hidePoll.value) {
+            hidePoll.value = true
+        }
+        if (!hidePrediction.value) {
+            hidePrediction.value = true
+        }
+        roomState.value = RoomState("0", "-1", "0", "0", "0")
+        autoReconnect = false
+    }
+
+    private inner class ChatReadListener(
+        private val channelLogin: String,
+        private val nameDisplay: String?,
+        private val showUserNotice: Boolean,
+        private val showClearMsg: Boolean,
+        private val showClearChat: Boolean,
+        private val usePubSub: Boolean,
+        private val networkLibrary: String?,
+        private val isLoggedIn: Boolean,
+        private val accountId: String?,
+        private val channelId: String?,
+    ) : ChatReadWebSocket.Listener {
+        override suspend fun onConnect() {
+            onMessage(ChatMessage(systemMsg = ContextCompat.getString(applicationContext, R.string.chat_join).format(channelLogin)))
+        }
+
+        override suspend fun onChatMessage(message: ChatUtils.IRCMessage, userNotice: Boolean) {
+            if (!userNotice || showUserNotice) {
+                val chatMessage = ChatUtils.parseChatMessage(message)
+                if (chatMessage.reply?.message != null) {
+                    onMessage(ChatMessage(
+                        type = ChatMessage.REPLY_MESSAGE,
+                        reply = chatMessage.reply,
+                        replyParent = chatMessage,
+                    ))
+                }
+                if (usePubSub && chatMessage.reward != null && !chatMessage.reward.id.isNullOrBlank()) {
                     onRewardMessage(chatMessage, networkLibrary, isLoggedIn, accountId, channelId)
                 } else {
                     onChatMessage(chatMessage, networkLibrary, isLoggedIn, accountId, channelId)
+                    if (chatMessage.msgId == "unraid") {
+                        if (!hideRaid.value) {
+                            hideRaid.value = true
+                        }
+                    }
                 }
             }
-            val onPointsEarned: (JSONObject) -> Unit = { message ->
-                val points = PubSubUtils.parsePointsEarned(message)
+        }
+
+        override suspend fun onClearMessage(message: ChatUtils.IRCMessage) {
+            if (showClearMsg) {
+                val chatMessage = ChatUtils.parseClearMessage(message)
+                val deletedMessage = chatMessage.targetMsgId?.let { targetId ->
+                    synchronized(chatMessages) {
+                        chatMessages.find { it.id == targetId }
+                    }
+                }
+                val clearMessage = getClearMessage(chatMessage, deletedMessage, nameDisplay)
+                onMessage(clearMessage)
+            }
+        }
+
+        override suspend fun onClearChat(message: ChatUtils.IRCMessage) {
+            if (showClearChat) {
+                onMessage(ChatUtils.parseClearChat(applicationContext, message))
+            }
+        }
+
+        override suspend fun onNotice(message: ChatUtils.IRCMessage) {
+            if (!isLoggedIn) {
+                onMessage(ChatUtils.parseNotice(message))
+            }
+        }
+
+        override suspend fun onRoomState(message: ChatUtils.IRCMessage) {
+            roomState.value = RoomState(
+                emote = message.tags["emote-only"],
+                followers = message.tags["followers-only"],
+                unique = message.tags["r9k"],
+                slow = message.tags["slow"],
+                subs = message.tags["subs-only"]
+            )
+        }
+
+        override suspend fun onDisconnect(message: String, fullMsg: String?) {
+            onMessage(ChatMessage(
+                systemMsg = ContextCompat.getString(applicationContext, R.string.chat_disconnect).format(channelLogin, message),
+                fullMsg = fullMsg
+            ))
+        }
+    }
+
+    private inner class ChatWriteListener(
+        private val channelId: String?,
+        private val showWebSocketDebugInfo: Boolean,
+    ) : ChatReadWebSocket.Listener {
+        override suspend fun onConnect() {
+            if (showWebSocketDebugInfo) {
+                onMessage(ChatMessage(systemMsg = ContextCompat.getString(applicationContext, R.string.websocket_connected).format("Chat write socket")))
+            }
+        }
+
+        override suspend fun onNotice(message: ChatUtils.IRCMessage) {
+            onMessage(ChatUtils.parseNotice(message))
+        }
+
+        override suspend fun onUserState(message: ChatUtils.IRCMessage) {
+            val emoteSets = message.tags["emote-sets"]?.split(",")
+            if (emoteSets != null && savedEmoteSets != emoteSets) {
+                savedEmoteSets = emoteSets
+                if (!loadedUserEmotes) {
+                    loadEmoteSets(channelId)
+                }
+            }
+        }
+
+        override suspend fun onDisconnect(message: String, fullMsg: String?) {
+            if (showWebSocketDebugInfo) {
                 onMessage(ChatMessage(
-                    systemMsg = ContextCompat.getString(applicationContext, R.string.points_earned).format(points.pointsGained),
-                    timestamp = points.timestamp,
-                    fullMsg = points.fullMsg
+                    systemMsg = ContextCompat.getString(applicationContext, R.string.websocket_disconnected).format("Chat write socket", message),
+                    fullMsg = fullMsg
                 ))
             }
-            val onClaimAvailable: () -> Unit = {
+        }
+    }
+
+    private inner class EventSubListener(
+        private val helixHeaders: Map<String, String>,
+        private val channelLogin: String,
+        private val showUserNotice: Boolean,
+        private val showClearChat: Boolean,
+        private val usePubSub: Boolean,
+        private val networkLibrary: String?,
+        private val isLoggedIn: Boolean,
+        private val accountId: String?,
+        private val channelId: String?,
+    ) : EventSubWebSocket.Listener {
+        override suspend fun onConnect() {
+            onMessage(ChatMessage(systemMsg = ContextCompat.getString(applicationContext, R.string.chat_join).format(channelLogin)))
+        }
+
+        override suspend fun onWelcomeMessage(sessionId: String) {
+            listOf(
+                "channel.chat.clear",
+                "channel.chat.message",
+                "channel.chat.notification",
+                "channel.chat_settings.update",
+            ).forEach {
+                viewModelScope.launch {
+                    try {
+                        helixRepository.createEventSubSubscription(networkLibrary, helixHeaders, accountId, channelId, it, sessionId)?.let {
+                            onMessage(ChatMessage(systemMsg = it))
+                        }
+                    } catch (e: Exception) {
+
+                    }
+                }
+            }
+        }
+
+        override suspend fun onChatMessage(event: JSONObject, timestamp: String?) {
+            val chatMessage = EventSubUtils.parseChatMessage(event, timestamp)
+            if (usePubSub && chatMessage.reward != null && !chatMessage.reward.id.isNullOrBlank()) {
+                onRewardMessage(chatMessage, networkLibrary, isLoggedIn, accountId, channelId)
+            } else {
+                onChatMessage(chatMessage, networkLibrary, isLoggedIn, accountId, channelId)
+            }
+        }
+
+        override suspend fun onUserNotice(event: JSONObject, timestamp: String?) {
+            if (showUserNotice) {
+                onChatMessage(EventSubUtils.parseUserNotice(event, timestamp), networkLibrary, isLoggedIn, accountId, channelId)
+            }
+        }
+
+        override suspend fun onClearChat(event: JSONObject, timestamp: String?) {
+            if (showClearChat) {
+                onMessage(EventSubUtils.parseClearChat(applicationContext, event, timestamp))
+            }
+        }
+
+        override suspend fun onRoomState(event: JSONObject, timestamp: String?) {
+            roomState.value = EventSubUtils.parseRoomState(event)
+        }
+
+        override suspend fun onDisconnect(message: String, fullMsg: String?) {
+            onMessage(ChatMessage(
+                systemMsg = ContextCompat.getString(applicationContext, R.string.chat_disconnect).format(channelLogin, message),
+                fullMsg = fullMsg
+            ))
+        }
+    }
+
+    private inner class PubSubListener(
+        private val channelLogin: String,
+        private val collectPoints: Boolean,
+        private val notifyPoints: Boolean,
+        private val showRaids: Boolean,
+        private val showPolls: Boolean,
+        private val showPredictions: Boolean,
+        private val networkLibrary: String?,
+        private val gqlHeaders: Map<String, String>,
+        private val isLoggedIn: Boolean,
+        private val accountId: String?,
+        private val channelId: String?,
+        private val enableIntegrity: Boolean,
+        private val showWebSocketDebugInfo: Boolean,
+    ) : HermesWebSocket.Listener {
+        override suspend fun onConnect() {
+            if (showWebSocketDebugInfo) {
+                onMessage(ChatMessage(systemMsg = ContextCompat.getString(applicationContext, R.string.websocket_connected).format("PubSub")))
+            }
+        }
+
+        override suspend fun onPlaybackMessage(message: JSONObject) {
+            val playbackMessage = PubSubUtils.parsePlaybackMessage(message)
+            if (playbackMessage != null) {
+                playbackMessage.live?.let {
+                    if (it) {
+                        onMessage(ChatMessage(
+                            type = ChatMessage.NOTICE_MESSAGE,
+                            systemMsg = ContextCompat.getString(applicationContext, R.string.stream_live).format(channelLogin),
+                        ))
+                    } else {
+                        onMessage(ChatMessage(
+                            type = ChatMessage.NOTICE_MESSAGE,
+                            systemMsg = ContextCompat.getString(applicationContext, R.string.stream_offline).format(channelLogin),
+                        ))
+                    }
+                }
+                _playbackMessage.value = playbackMessage
+            }
+        }
+
+        override suspend fun onStreamInfo(message: JSONObject) {
+            _streamInfo.value = PubSubUtils.parseStreamInfo(message)
+        }
+
+        override suspend fun onRewardMessage(message: JSONObject) {
+            val chatMessage = PubSubUtils.parseRewardMessage(message)
+            if (!chatMessage.message.isNullOrBlank()) {
+                onRewardMessage(chatMessage, networkLibrary, isLoggedIn, accountId, channelId)
+            } else {
+                onChatMessage(chatMessage, networkLibrary, isLoggedIn, accountId, channelId)
+            }
+        }
+
+        override suspend fun onPointsEarned(message: JSONObject) {
+            if (notifyPoints) {
+                val result = PubSubUtils.parsePointsEarned(message)
+                val points = result.first
+                val messageChannelId = result.second
+                if (channelId == messageChannelId) {
+                    onMessage(ChatMessage(
+                        type = ChatMessage.NOTICE_MESSAGE,
+                        systemMsg = ContextCompat.getString(applicationContext, R.string.points_earned).format(points.pointsGained),
+                        timestamp = points.timestamp,
+                        fullMsg = points.fullMsg
+                    ))
+                }
+            }
+        }
+
+        override suspend fun onClaimAvailable() {
+            if (collectPoints) {
                 if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
                     viewModelScope.launch {
                         try {
                             val response = graphQLRepository.loadChannelPointsContext(networkLibrary, gqlHeaders, channelLogin)
-                            if (enableIntegrity && integrity.value == null) {
-                                response.errors?.find { it.message == "failed integrity check" }?.let {
-                                    integrity.value = "refresh"
+                            if (enableIntegrity) {
+                                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                    integrity.emit("refresh")
                                     return@launch
                                 }
                             }
                             response.data?.community?.channel?.self?.communityPoints?.availableClaim?.id?.let { claimId ->
                                 val response = graphQLRepository.loadClaimPoints(networkLibrary, gqlHeaders, channelId, claimId)
-                                if (enableIntegrity && integrity.value == null) {
-                                    response.errors?.find { it.message == "failed integrity check" }?.let {
-                                        integrity.value = "refresh"
+                                if (enableIntegrity) {
+                                    response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                        integrity.emit("refresh")
                                         return@launch
                                     }
                                 }
@@ -877,18 +1488,20 @@ class ChatViewModel @Inject constructor(
                     }
                 }
             }
-            val onMinuteWatched: () -> Unit = {
-                if (!streamId.isNullOrBlank()) {
-                    viewModelScope.launch {
-                        try {
-                            playerRepository.sendMinuteWatched(networkLibrary, accountId, streamId, channelId, channelLogin)
-                        } catch (e: Exception) {
+        }
 
-                        }
-                    }
+        override suspend fun onMinuteWatched() {
+            if (!streamId.isNullOrBlank()) {
+                try {
+                    playerRepository.sendMinuteWatched(networkLibrary, accountId, streamId, channelId, channelLogin)
+                } catch (e: Exception) {
+
                 }
             }
-            val onRaidUpdate: (JSONObject, Boolean) -> Unit = { message, openStream ->
+        }
+
+        override suspend fun onRaidUpdate(message: JSONObject, openStream: Boolean) {
+            if (showRaids) {
                 PubSubUtils.onRaidUpdate(message, openStream)?.let {
                     if (it.raidId != usedRaidId) {
                         usedRaidId = it.raidId
@@ -897,9 +1510,9 @@ class ChatViewModel @Inject constructor(
                             viewModelScope.launch {
                                 try {
                                     val response = graphQLRepository.loadJoinRaid(networkLibrary, gqlHeaders, it.raidId)
-                                    if (enableIntegrity && integrity.value == null) {
-                                        response.errors?.find { it.message == "failed integrity check" }?.let {
-                                            integrity.value = "refresh"
+                                    if (enableIntegrity) {
+                                        response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                            integrity.emit("refresh")
                                             return@launch
                                         }
                                     }
@@ -912,7 +1525,10 @@ class ChatViewModel @Inject constructor(
                     raid.value = it
                 }
             }
-            val onPollUpdate: (JSONObject) -> Unit = { message ->
+        }
+
+        override suspend fun onPollUpdate(message: JSONObject) {
+            if (showPolls) {
                 PubSubUtils.onPollUpdate(message)?.let {
                     if (it.id != usedPollId) {
                         usedPollId = it.id
@@ -944,7 +1560,10 @@ class ChatViewModel @Inject constructor(
                     poll.value = it
                 }
             }
-            val onPredictionUpdate: (JSONObject) -> Unit = { message ->
+        }
+
+        override suspend fun onPredictionUpdate(message: JSONObject) {
+            if (showPredictions) {
                 PubSubUtils.onPredictionUpdate(message)?.let {
                     if (it.id != usedPredictionId) {
                         usedPredictionId = it.id
@@ -976,388 +1595,199 @@ class ChatViewModel @Inject constructor(
                     prediction.value = it
                 }
             }
-            val useNewPubSub = applicationContext.prefs().getBoolean(C.DEBUG_USE_NEW_PUBSUB, true)
-            val webGQLToken = applicationContext.tokenPrefs().getString(C.GQL_TOKEN_WEB, null)
-            if (useNewPubSub && (accountId.isNullOrBlank() || !collectPoints || !webGQLToken.isNullOrBlank() || enableIntegrity)) {
-                if (useCustomWebSockets) {
-                    hermesWebSocket = HermesWebSocket(
-                        channelId = channelId,
-                        userId = accountId,
-                        gqlToken = if (enableIntegrity) {
-                            gqlHeaders[C.HEADER_TOKEN]?.removePrefix("OAuth ")
-                        } else {
-                            webGQLToken
-                        },
-                        collectPoints = collectPoints,
-                        notifyPoints = applicationContext.prefs().getBoolean(C.CHAT_POINTS_NOTIFY, false),
-                        showRaids = applicationContext.prefs().getBoolean(C.CHAT_RAIDS_SHOW, true),
-                        showPolls = applicationContext.prefs().getBoolean(C.CHAT_POLLS_SHOW, true),
-                        showPredictions = applicationContext.prefs().getBoolean(C.CHAT_PREDICTIONS_SHOW, true),
-                        onConnect = {
-                            if (showWebSocketDebugInfo) {
-                                onConnectWebSocket("PubSub")
-                            }
-                        },
-                        onDisconnect = { message, fullMsg ->
-                            if (showWebSocketDebugInfo) {
-                                onDisconnectWebSocket("PubSub", message, fullMsg)
-                            }
-                        },
-                        onPlaybackMessage = onPlaybackMessage,
-                        onStreamInfo = onStreamInfo,
-                        onRewardMessage = onRewardMessage,
-                        onPointsEarned = onPointsEarned,
-                        onClaimAvailable = onClaimAvailable,
-                        onMinuteWatched = onMinuteWatched,
-                        onRaidUpdate = onRaidUpdate,
-                        onPollUpdate = onPollUpdate,
-                        onPredictionUpdate = onPredictionUpdate,
-                        trustManager = trustManager,
-                        coroutineScope = viewModelScope,
-                    ).apply { connect() }
-                } else {
-                    hermesWebSocketOkHttp = HermesWebSocketOkHttp(
-                        channelId = channelId,
-                        userId = accountId,
-                        gqlToken = if (enableIntegrity) {
-                            gqlHeaders[C.HEADER_TOKEN]?.removePrefix("OAuth ")
-                        } else {
-                            webGQLToken
-                        },
-                        collectPoints = collectPoints,
-                        notifyPoints = applicationContext.prefs().getBoolean(C.CHAT_POINTS_NOTIFY, false),
-                        showRaids = applicationContext.prefs().getBoolean(C.CHAT_RAIDS_SHOW, true),
-                        showPolls = applicationContext.prefs().getBoolean(C.CHAT_POLLS_SHOW, true),
-                        showPredictions = applicationContext.prefs().getBoolean(C.CHAT_PREDICTIONS_SHOW, true),
-                        client = okHttpClient,
-                        onPlaybackMessage = onPlaybackMessage,
-                        onStreamInfo = onStreamInfo,
-                        onRewardMessage = onRewardMessage,
-                        onPointsEarned = onPointsEarned,
-                        onClaimAvailable = onClaimAvailable,
-                        onMinuteWatched = onMinuteWatched,
-                        onRaidUpdate = onRaidUpdate,
-                        onPollUpdate = onPollUpdate,
-                        onPredictionUpdate = onPredictionUpdate,
-                    ).apply { connect() }
-                }
-            } else {
-                pubSub = PubSubWebSocket(
-                    channelId = channelId,
-                    userId = accountId,
-                    gqlToken = gqlHeaders[C.HEADER_TOKEN]?.removePrefix("OAuth "),
-                    collectPoints = collectPoints,
-                    notifyPoints = applicationContext.prefs().getBoolean(C.CHAT_POINTS_NOTIFY, false),
-                    showRaids = applicationContext.prefs().getBoolean(C.CHAT_RAIDS_SHOW, true),
-                    showPolls = applicationContext.prefs().getBoolean(C.CHAT_POLLS_SHOW, true),
-                    showPredictions = applicationContext.prefs().getBoolean(C.CHAT_PREDICTIONS_SHOW, true),
-                    client = okHttpClient,
-                    onPlaybackMessage = onPlaybackMessage,
-                    onStreamInfo = onStreamInfo,
-                    onRewardMessage = onRewardMessage,
-                    onPointsEarned = onPointsEarned,
-                    onClaimAvailable = onClaimAvailable,
-                    onMinuteWatched = onMinuteWatched,
-                    onRaidUpdate = onRaidUpdate,
-                    onPollUpdate = onPollUpdate,
-                    onPredictionUpdate = onPredictionUpdate,
-                ).apply { connect() }
+        }
+
+        override suspend fun onDisconnect(message: String, fullMsg: String?) {
+            if (showWebSocketDebugInfo) {
+                onMessage(ChatMessage(
+                    systemMsg = ContextCompat.getString(applicationContext, R.string.websocket_disconnected).format("PubSub", message),
+                    fullMsg = fullMsg
+                ))
             }
         }
-        val showNamePaints = applicationContext.prefs().getBoolean(C.CHAT_SHOW_PAINTS, true)
-        val showStvBadges = applicationContext.prefs().getBoolean(C.CHAT_SHOW_STV_BADGES, true)
-        val showPersonalEmotes = applicationContext.prefs().getBoolean(C.CHAT_SHOW_PERSONAL_EMOTES, true)
-        val stvLiveUpdates = applicationContext.prefs().getBoolean(C.CHAT_STV_LIVE_UPDATES, true)
-        if ((showNamePaints || showStvBadges || showPersonalEmotes || stvLiveUpdates) && !channelId.isNullOrBlank()) {
-            val onPaint: (NamePaint) -> Unit = { paint ->
-                if (showNamePaints) {
-                    namePaints.find { it.id == paint.id }?.let { namePaints.remove(it) }
-                    namePaints.add(paint)
-                    newPaint.value = paint
-                }
+    }
+
+    private inner class STVEventApiListener(
+        private val useWebp: Boolean,
+        private val showNamePaints: Boolean,
+        private val showSTVBadges: Boolean,
+        private val showPersonalEmotes: Boolean,
+        private val stvLiveUpdates: Boolean,
+        private val networkLibrary: String?,
+        private val isLoggedIn: Boolean,
+        private val accountId: String?,
+        private val channelId: String?,
+        private val showWebSocketDebugInfo: Boolean,
+    ) : STVEventApiWebSocket.Listener {
+        override suspend fun onConnect() {
+            if (showWebSocketDebugInfo) {
+                onMessage(ChatMessage(systemMsg = ContextCompat.getString(applicationContext, R.string.websocket_connected).format("7TV Event API")))
             }
-            val onBadge: (StvBadge) -> Unit = { badge ->
-                if (showStvBadges) {
-                    stvBadges.find { it.id == badge.id }?.let { stvBadges.remove(it) }
-                    stvBadges.add(badge)
-                    newStvBadge.value = badge
-                }
-            }
-            val onEmoteSet: (String, List<Emote>, List<Emote>, List<Pair<Emote, Emote>>) -> Unit = { setId, added, removed, updated ->
-                if (setId == channelStvEmoteSetId) {
+        }
+
+        override suspend fun onEmoteSetUpdate(body: JSONObject) {
+            val result = STVEventApiUtils.parseEmoteSetUpdate(body, useWebp, channelSTVEmoteSetId)
+            if (result != null) {
+                if (result.channelSet) {
                     if (stvLiveUpdates) {
-                        val removedEmotes = (removed + updated.map { it.first }).map { it.name }
-                        val newEmotes = added + updated.map { it.second }
-                        allEmotes.removeAll { it.name in removedEmotes }
-                        allEmotes.addAll(newEmotes.filter { it !in allEmotes })
-                        val existingSet = channelStvEmotes.value?.filter { it.name !in removedEmotes } ?: emptyList()
-                        _channelStvEmotes.value = existingSet + newEmotes
+                        val removedEmotes = (result.removed + result.updated.map { it.first }).map { it.name }
+                        val newEmotes = result.added + result.updated.map { it.second }
+                        synchronized(thirdPartyEmotes) {
+                            thirdPartyEmotes.removeAll { it.name in removedEmotes }
+                            thirdPartyEmotes.addAll(newEmotes)
+                        }
                         if (!reloadMessages.value) {
                             reloadMessages.value = true
+                        }
+                        viewModelScope.launch {
+                            thirdPartyEmotesUpdated.emit(Unit)
+                        }
+                        synchronized(allEmotes) {
+                            allEmotes.removeAll { it in removedEmotes }
+                            allEmotes.addAll(newEmotes.filter { it.name !in allEmotes }.mapNotNull { it.name })
                         }
                     }
                 } else {
                     if (showPersonalEmotes) {
-                        val removedEmotes = (removed + updated.map { it.first }).map { it.name }
-                        val existingSet = personalEmoteSets[setId]?.filter { it.name !in removedEmotes } ?: emptyList()
-                        personalEmoteSets.remove(setId)
-                        val set = existingSet + added + updated.map { it.second }
-                        personalEmoteSets.put(setId, set)
-                        newPersonalEmoteSet.value = Pair(setId, set)
-                        if (isLoggedIn && !accountId.isNullOrBlank() && setId == _userPersonalEmoteSet.value?.first) {
-                            _userPersonalEmoteSet.value = Pair(setId, set)
+                        val removedEmotes = (result.removed + result.updated.map { it.first }).map { it.name }
+                        synchronized(personalEmoteSets) {
+                            val existingSet = personalEmoteSets[result.setId]?.filter { it.name !in removedEmotes } ?: emptyList()
+                            personalEmoteSets.remove(result.setId)
+                            val set = existingSet + result.added + result.updated.map { it.second }
+                            personalEmoteSets[result.setId] = set
+                        }
+                        if (isLoggedIn && !accountId.isNullOrBlank() && result.setId == userSTVEmoteSetId) {
+                            viewModelScope.launch {
+                                thirdPartyEmotesUpdated.emit(Unit)
+                            }
                         }
                     }
                 }
             }
-            val onPaintUser: (String, String) -> Unit = { userId, paintId ->
-                if (showNamePaints) {
-                    val item = paintUsers.entries.find { it.key == userId }
-                    if (item == null || item.value != paintId) {
-                        item?.let { paintUsers.remove(it.key) }
-                        paintUsers.put(userId, paintId)
-                        newPaintUser.value = Pair(userId, paintId)
+        }
+
+        override suspend fun onCosmetic(body: JSONObject) {
+            val result = STVEventApiUtils.parseCosmetic(body, useWebp)
+            if (result != null) {
+                when (result) {
+                    is STVEventApiUtils.Cosmetic.Paint -> {
+                        if (showNamePaints) {
+                            synchronized(namePaints) {
+                                namePaints.find { it.id == result.paint.id }?.let { namePaints.remove(it) }
+                                namePaints.add(result.paint)
+                            }
+                        }
                     }
-                }
-            }
-            val onBadgeUser: (String, String) -> Unit = { userId, badgeId ->
-                if (showStvBadges) {
-                    val item = stvBadgeUsers.entries.find { it.key == userId }
-                    if (item == null || item.value != badgeId) {
-                        item?.let { stvBadgeUsers.remove(it.key) }
-                        stvBadgeUsers.put(userId, badgeId)
-                        newStvBadgeUser.value = Pair(userId, badgeId)
-                    }
-                }
-            }
-            val onEmoteSetUser: (String, String) -> Unit = { userId, setId ->
-                if (showPersonalEmotes) {
-                    val item = personalEmoteSetUsers.entries.find { it.key == userId }
-                    if (item == null || item.value != setId) {
-                        item?.let { personalEmoteSetUsers.remove(it.key) }
-                        personalEmoteSetUsers.put(userId, setId)
-                        newPersonalEmoteSetUser.value = Pair(userId, setId)
-                        if (isLoggedIn && !accountId.isNullOrBlank() && userId == accountId) {
-                            _userPersonalEmoteSet.value = Pair(setId, personalEmoteSets[setId] ?: emptyList())
+                    is STVEventApiUtils.Cosmetic.Badge -> {
+                        if (showSTVBadges) {
+                            synchronized(stvBadges) {
+                                stvBadges.find { it.id == result.badge.id }?.let { stvBadges.remove(it) }
+                                stvBadges.add(result.badge)
+                            }
                         }
                     }
                 }
             }
-            val onUpdatePresence: (String) -> Unit = { sessionId ->
-                onUpdatePresence(networkLibrary, sessionId, channelId, true)
-            }
-            if (useCustomWebSockets) {
-                stvEventApi = StvEventApiWebSocket(
-                    onConnect = {
-                        if (showWebSocketDebugInfo) {
-                            onConnectWebSocket("7TV Event API")
-                        }
-                    },
-                    onDisconnect = { message, fullMsg ->
-                        if (showWebSocketDebugInfo) {
-                            onDisconnectWebSocket("7TV Event API", message, fullMsg)
-                        }
-                    },
-                    channelId = channelId,
-                    useWebp = applicationContext.prefs().getBoolean(C.CHAT_USE_WEBP, true),
-                    onPaint = onPaint,
-                    onBadge = onBadge,
-                    onEmoteSet = onEmoteSet,
-                    onPaintUser = onPaintUser,
-                    onBadgeUser = onBadgeUser,
-                    onEmoteSetUser = onEmoteSetUser,
-                    onUpdatePresence = onUpdatePresence,
-                    trustManager = trustManager,
-                    coroutineScope = viewModelScope,
-                ).apply { connect() }
-            } else {
-                stvEventApiOkHttp = StvEventApiWebSocketOkHttp(
-                    channelId = channelId,
-                    useWebp = applicationContext.prefs().getBoolean(C.CHAT_USE_WEBP, true),
-                    client = okHttpClient,
-                    onPaint = onPaint,
-                    onBadge = onBadge,
-                    onEmoteSet = onEmoteSet,
-                    onPaintUser = onPaintUser,
-                    onBadgeUser = onBadgeUser,
-                    onEmoteSetUser = onEmoteSetUser,
-                    onUpdatePresence = onUpdatePresence,
-                ).apply { connect() }
-            }
-            if (isLoggedIn && !accountId.isNullOrBlank()) {
-                viewModelScope.launch {
-                    try {
-                        stvUserId = playerRepository.getStvUser(networkLibrary, accountId).takeIf { !it.isNullOrBlank() }
-                    } catch (e: Exception) {
+        }
 
+        override suspend fun onEntitlement(body: JSONObject) {
+            val result = STVEventApiUtils.parseEntitlement(body)
+            if (result != null) {
+                when (result) {
+                    is STVEventApiUtils.Entitlement.Paint -> {
+                        if (showNamePaints) {
+                            synchronized(stvUsers) {
+                                val user = stvUsers.find { it.userId == result.userId }
+                                if (user != null) {
+                                    if (user.paintId != result.paintId) {
+                                        user.paintId = result.paintId
+                                        true
+                                    } else false
+                                } else {
+                                    stvUsers.add(STVUser(
+                                        userId = result.userId,
+                                        paintId = result.paintId
+                                    ))
+                                    true
+                                }
+                            }.let {
+                                if (it) {
+                                    updateUserMessages.emit(result.userId)
+                                }
+                            }
+                        }
+                    }
+                    is STVEventApiUtils.Entitlement.Badge -> {
+                        if (showSTVBadges) {
+                            synchronized(stvUsers) {
+                                val user = stvUsers.find { it.userId == result.userId }
+                                if (user != null) {
+                                    if (user.badgeId != result.badgeId) {
+                                        user.badgeId = result.badgeId
+                                        true
+                                    } else false
+                                } else {
+                                    stvUsers.add(STVUser(
+                                        userId = result.userId,
+                                        badgeId = result.badgeId
+                                    ))
+                                    true
+                                }
+                            }.let {
+                                if (it) {
+                                    updateUserMessages.emit(result.userId)
+                                }
+                            }
+                        }
+                    }
+                    is STVEventApiUtils.Entitlement.EmoteSet -> {
+                        if (showPersonalEmotes) {
+                            synchronized(stvUsers) {
+                                val user = stvUsers.find { it.userId == result.userId }
+                                if (user != null) {
+                                    if (user.emoteSetId != result.setId) {
+                                        user.emoteSetId = result.setId
+                                        true
+                                    } else false
+                                } else {
+                                    stvUsers.add(STVUser(
+                                        userId = result.userId,
+                                        emoteSetId = result.setId
+                                    ))
+                                    true
+                                }
+                            }.let {
+                                if (it) {
+                                    updateUserMessages.emit(result.userId)
+                                }
+                            }
+                            if (isLoggedIn && !accountId.isNullOrBlank() && result.userId == accountId) {
+                                userSTVEmoteSetId = result.setId
+                                viewModelScope.launch {
+                                    thirdPartyEmotesUpdated.emit(Unit)
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
-    }
 
-    fun stopLiveChat() {
-        chatReadIRC?.let {
-            MainScope().launch(Dispatchers.IO) {
-                it.disconnect()
-            }
-        } ?:
-        chatReadWebSocketOkHttp?.disconnect() ?:
-        chatReadWebSocket?.let {
-            MainScope().launch(Dispatchers.IO) {
-                it.disconnect()
-            }
-        } ?:
-        eventSubOkHttp?.disconnect() ?:
-        eventSub?.let {
-            MainScope().launch(Dispatchers.IO) {
-                it.disconnect()
-            }
+        override suspend fun onUpdatePresence(sessionId: String) {
+            onUpdatePresence(networkLibrary, sessionId, channelId, true)
         }
-        chatWriteIRC?.let {
-            MainScope().launch(Dispatchers.IO) {
-                it.disconnect()
-            }
-        } ?:
-        chatWriteWebSocketOkHttp?.disconnect() ?:
-        chatWriteWebSocket?.let {
-            MainScope().launch(Dispatchers.IO) {
-                it.disconnect()
-            }
-        }
-        hermesWebSocketOkHttp?.disconnect() ?:
-        hermesWebSocket?.let {
-            MainScope().launch(Dispatchers.IO) {
-                it.disconnect()
-            }
-        } ?:
-        pubSub?.disconnect()
-        stvEventApiOkHttp?.disconnect() ?:
-        stvEventApi?.let {
-            MainScope().launch(Dispatchers.IO) {
-                it.disconnect()
-            }
-        }
-    }
 
-    fun isActive(): Boolean? {
-        return chatReadIRC?.isActive ?: chatReadWebSocketOkHttp?.isActive ?: chatReadWebSocket?.isActive ?: eventSubOkHttp?.isActive ?: eventSub?.isActive
-    }
-
-    fun disconnect() {
-        stopLiveChat()
-        usedRaidId = null
-        raidClosed = true
-        usedPollId = null
-        pollClosed = true
-        pollSecondsLeft.value = null
-        pollTimer?.cancel()
-        usedPredictionId = null
-        predictionClosed = true
-        predictionSecondsLeft.value = null
-        predictionTimer?.cancel()
-        _chatMessages.value = arrayListOf(
-            ChatMessage(systemMsg = ContextCompat.getString(applicationContext, R.string.disconnected))
-        )
-        if (!hideRaid.value) {
-            hideRaid.value = true
-        }
-        if (!hidePoll.value) {
-            hidePoll.value = true
-        }
-        if (!hidePrediction.value) {
-            hidePrediction.value = true
-        }
-        roomState.value = RoomState("0", "-1", "0", "0", "0")
-        autoReconnect = false
-    }
-
-    private fun onConnect(channelLogin: String?) {
-        onMessage(ChatMessage(systemMsg = ContextCompat.getString(applicationContext, R.string.chat_join).format(channelLogin)))
-    }
-
-    private fun onDisconnect(channelLogin: String?, message: String, fullMsg: String) {
-        onMessage(ChatMessage(
-            systemMsg = ContextCompat.getString(applicationContext, R.string.chat_disconnect).format(channelLogin, message),
-            fullMsg = fullMsg
-        ))
-    }
-
-    private fun onSendMessageError(message: String, fullMsg: String) {
-        onMessage(ChatMessage(
-            systemMsg = ContextCompat.getString(applicationContext, R.string.chat_send_msg_error).format(message),
-            fullMsg = fullMsg
-        ))
-    }
-
-    private fun onConnectWebSocket(webSocket: String?) {
-        onMessage(ChatMessage(systemMsg = ContextCompat.getString(applicationContext, R.string.websocket_connected).format(webSocket)))
-    }
-
-    private fun onDisconnectWebSocket(webSocket: String?, message: String, fullMsg: String) {
-        onMessage(ChatMessage(
-            systemMsg = ContextCompat.getString(applicationContext, R.string.websocket_disconnected).format(webSocket, message),
-            fullMsg = fullMsg
-        ))
-    }
-
-    private fun onChatMessage(message: String, userNotice: Boolean, showUserNotice: Boolean, usePubSub: Boolean, networkLibrary: String?, isLoggedIn: Boolean, accountId: String?, channelId: String?) {
-        if (!userNotice || showUserNotice) {
-            val chatMessage = ChatUtils.parseChatMessage(message, userNotice)
-            if (chatMessage.reply?.message != null) {
+        override suspend fun onDisconnect(message: String, fullMsg: String?) {
+            if (showWebSocketDebugInfo) {
                 onMessage(ChatMessage(
-                    reply = chatMessage.reply,
-                    isReply = true,
-                    replyParent = chatMessage,
+                    systemMsg = ContextCompat.getString(applicationContext, R.string.websocket_disconnected).format("7TV Event API", message),
+                    fullMsg = fullMsg
                 ))
             }
-            if (usePubSub && chatMessage.reward != null && !chatMessage.reward.id.isNullOrBlank()) {
-                onRewardMessage(chatMessage, networkLibrary, isLoggedIn, accountId, channelId)
-            } else {
-                onChatMessage(chatMessage, networkLibrary, isLoggedIn, accountId, channelId)
-            }
         }
     }
 
-    private fun onClearMessage(message: String, nameDisplay: String?) {
-        val pair = ChatUtils.parseClearMessage(message)
-        val deletedMessage = try {
-            pair.second?.let { targetId -> _chatMessages.value.toList().find { it.id == targetId } }
-        } catch (e: NullPointerException) {
-            null
-        }
-        onMessage(getClearMessage(pair.first, deletedMessage, nameDisplay))
-    }
-
-    private fun onClearChat(message: String) {
-        onMessage(ChatUtils.parseClearChat(applicationContext, message))
-    }
-
-    private fun onNotice(message: String) {
-        val result = ChatUtils.parseNotice(applicationContext, message)
-        onMessage(result.first)
-        if (result.second) {
-            if (!hideRaid.value) {
-                hideRaid.value = true
-            }
-        }
-    }
-
-    private fun onRoomState(message: String) {
-        roomState.value = ChatUtils.parseRoomState(message)
-    }
-
-    private fun onUserState(message: String, channelId: String?) {
-        val emoteSets = ChatUtils.parseEmoteSets(message)
-        if (emoteSets != null && savedEmoteSets != emoteSets) {
-            savedEmoteSets = emoteSets
-            if (!loadedUserEmotes) {
-                loadEmoteSets(channelId)
-            }
-        }
-    }
-
-    private fun onChatMessage(message: ChatMessage, networkLibrary: String?, isLoggedIn: Boolean, accountId: String?, channelId: String?) {
+    private suspend fun onChatMessage(message: ChatMessage, networkLibrary: String?, isLoggedIn: Boolean, accountId: String?, channelId: String?) {
         onMessage(message)
         addChatter(message.userName)
         if (isLoggedIn && !accountId.isNullOrBlank() && message.userId == accountId) {
@@ -1369,7 +1799,9 @@ class ChatViewModel @Inject constructor(
         if (displayName != null && !chatters.containsKey(displayName)) {
             val chatter = Chatter(displayName)
             chatters[displayName] = chatter
-            newChatter.value = chatter
+            synchronized(autoCompleteList) {
+                autoCompleteList.add(chatter)
+            }
         }
     }
 
@@ -1380,7 +1812,7 @@ class ChatViewModel @Inject constructor(
                 stvLastPresenceUpdate = System.currentTimeMillis()
                 viewModelScope.launch {
                     try {
-                        playerRepository.sendStvPresence(networkLibrary, stvUserId, channelId, sessionId, self)
+                        playerRepository.sendSTVPresence(networkLibrary, stvUserId, channelId, sessionId, self)
                     } catch (e: Exception) {
 
                     }
@@ -1389,38 +1821,46 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    private fun onRewardMessage(message: ChatMessage, networkLibrary: String?, isLoggedIn: Boolean, accountId: String?, channelId: String?) {
+    private suspend fun onRewardMessage(message: ChatMessage, networkLibrary: String?, isLoggedIn: Boolean, accountId: String?, channelId: String?) {
         if (message.reward?.id != null) {
-            val item = rewardList.find { it.reward?.id == message.reward.id && it.userId == message.userId }
-            if (item != null) {
-                rewardList.remove(item)
-                onChatMessage(ChatMessage(
-                    id = message.id ?: item.id,
-                    userId = message.userId ?: item.userId,
-                    userLogin = message.userLogin ?: item.userLogin,
-                    userName = message.userName ?: item.userName,
-                    message = message.message ?: item.message,
-                    color = message.color ?: item.color,
-                    emotes = message.emotes ?: item.emotes,
-                    badges = message.badges ?: item.badges,
-                    isAction = message.isAction || item.isAction,
-                    isFirst = message.isFirst || item.isFirst,
-                    bits = message.bits ?: item.bits,
-                    systemMsg = message.systemMsg ?: item.systemMsg,
-                    msgId = message.msgId ?: item.msgId,
-                    reward = ChannelPointReward(
-                        id = message.reward.id,
-                        title = message.reward.title ?: item.reward?.title,
-                        cost = message.reward.cost ?: item.reward?.cost,
-                        url1x = message.reward.url1x ?: item.reward?.url1x,
-                        url2x = message.reward.url2x ?: item.reward?.url2x,
-                        url4x = message.reward.url4x ?: item.reward?.url4x,
-                    ),
-                    timestamp = message.timestamp ?: item.timestamp,
-                    fullMsg = message.fullMsg ?: item.fullMsg,
-                ), networkLibrary, isLoggedIn, accountId, channelId)
-            } else {
-                rewardList.add(message)
+            synchronized(rewardList) {
+                val item = rewardList.find { it.reward?.id == message.reward.id && it.userId == message.userId }
+                if (item != null) {
+                    rewardList.remove(item)
+                    item
+                } else {
+                    rewardList.add(message)
+                    null
+                }
+            }.let { item ->
+                if (item != null) {
+                    onChatMessage(ChatMessage(
+                        type = ChatMessage.USER_MESSAGE,
+                        id = message.id ?: item.id,
+                        userId = message.userId ?: item.userId,
+                        userLogin = message.userLogin ?: item.userLogin,
+                        userName = message.userName ?: item.userName,
+                        message = message.message ?: item.message,
+                        color = message.color ?: item.color,
+                        emotes = message.emotes ?: item.emotes,
+                        badges = message.badges ?: item.badges,
+                        isAction = message.isAction || item.isAction,
+                        isFirst = message.isFirst || item.isFirst,
+                        bits = message.bits ?: item.bits,
+                        systemMsg = message.systemMsg ?: item.systemMsg,
+                        msgId = message.msgId ?: item.msgId,
+                        reward = ChannelPointReward(
+                            id = message.reward.id,
+                            title = message.reward.title ?: item.reward?.title,
+                            cost = message.reward.cost ?: item.reward?.cost,
+                            url1x = message.reward.url1x ?: item.reward?.url1x,
+                            url2x = message.reward.url2x ?: item.reward?.url2x,
+                            url4x = message.reward.url4x ?: item.reward?.url4x,
+                        ),
+                        timestamp = message.timestamp ?: item.timestamp,
+                        fullMsg = message.fullMsg ?: item.fullMsg,
+                    ), networkLibrary, isLoggedIn, accountId, channelId)
+                }
             }
         } else {
             onChatMessage(message, networkLibrary, isLoggedIn, accountId, channelId)
@@ -1432,7 +1872,7 @@ class ChatViewModel @Inject constructor(
         if (!savedEmoteSets.isNullOrEmpty() && !helixHeaders[C.HEADER_CLIENT_ID].isNullOrBlank() && !helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
             viewModelScope.launch {
                 try {
-                    val networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, "OkHttp")
+                    val networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP)
                     val animateGifs =  applicationContext.prefs().getBoolean(C.ANIMATED_EMOTES, true)
                     val emotes = mutableListOf<TwitchEmote>()
                     savedEmoteSets?.chunked(25)?.forEach { list ->
@@ -1441,8 +1881,24 @@ class ChatViewModel @Inject constructor(
                     if (emotes.isNotEmpty()) {
                         val sorted = emotes.sortedByDescending { it.setId }
                         savedUserEmotes = sorted
-                        addEmotes(
-                            sorted.map {
+                        synchronized(userEmotes) {
+                            userEmotes.clear()
+                            userEmotes.addAll(
+                                sorted.sortedByDescending { it.ownerId == channelId }.map {
+                                    Emote(
+                                        name = it.name,
+                                        url1x = it.url1x,
+                                        url2x = it.url2x,
+                                        url3x = it.url3x,
+                                        url4x = it.url4x,
+                                        format = it.format
+                                    )
+                                }
+                            )
+                        }
+                        userEmotesUpdated.emit(Unit)
+                        synchronized(autoCompleteList) {
+                            autoCompleteList.addAll(sorted.map {
                                 Emote(
                                     name = it.name,
                                     url1x = it.url1x,
@@ -1451,21 +1907,14 @@ class ChatViewModel @Inject constructor(
                                     url4x = it.url4x,
                                     format = it.format
                                 )
-                            }
-                        )
-                        _userEmotes.value = sorted.sortedByDescending { it.ownerId == channelId }.map {
-                            Emote(
-                                name = it.name,
-                                url1x = it.url1x,
-                                url2x = it.url2x,
-                                url3x = it.url3x,
-                                url4x = it.url4x,
-                                format = it.format
-                            )
+                            }.filter { it !in autoCompleteList })
+                        }
+                        synchronized(allEmotes) {
+                            allEmotes.addAll(sorted.filter { it.name !in allEmotes }.mapNotNull { it.name })
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to load emote sets", e)
+
                 }
             }
         }
@@ -1474,7 +1923,7 @@ class ChatViewModel @Inject constructor(
     fun startPollTimeout(hide: () -> Unit) {
         pollTimeoutJob?.cancel()
         pollTimeoutJob = viewModelScope.launch {
-            delay(20000)
+            delay(20.seconds)
             hide()
         }
     }
@@ -1482,166 +1931,157 @@ class ChatViewModel @Inject constructor(
     fun startPredictionTimeout(hide: () -> Unit) {
         predictionTimeoutJob?.cancel()
         predictionTimeoutJob = viewModelScope.launch {
-            delay(20000)
+            delay(20.seconds)
             hide()
         }
     }
 
     fun send(message: CharSequence, replyId: String?, networkLibrary: String?, gqlHeaders: Map<String, String>, helixHeaders: Map<String, String>, accountId: String?, channelId: String?, channelLogin: String?, useApiCommands: Boolean, useApiChatMessages: Boolean, enableIntegrity: Boolean) {
-        if (replyId != null) {
-            sendMessage(message, networkLibrary, gqlHeaders, helixHeaders, accountId, channelId, useApiChatMessages, enableIntegrity, replyId)
-        } else {
-            if (useApiCommands) {
-                if (message.toString().startsWith("/")) {
-                    try {
-                        sendCommand(message, networkLibrary, gqlHeaders, helixHeaders, accountId, channelId, channelLogin, useApiChatMessages, enableIntegrity)
-                    } catch (e: Exception) {
-
-                    }
-                } else {
-                    sendMessage(message, networkLibrary, gqlHeaders, helixHeaders, accountId, channelId, useApiChatMessages, enableIntegrity)
-                }
-            } else {
-                if (message.toString() == "/dc" || message.toString() == "/disconnect") {
-                    disconnect()
-                } else {
-                    sendMessage(message, networkLibrary, gqlHeaders, helixHeaders, accountId, channelId, useApiChatMessages, enableIntegrity)
-                }
-            }
-        }
-    }
-
-    private fun sendMessage(message: CharSequence, networkLibrary: String?, gqlHeaders: Map<String, String>, helixHeaders: Map<String, String>, accountId: String?, channelId: String?, useApiChatMessages: Boolean, enableIntegrity: Boolean, replyId: String? = null) {
-        if (useApiChatMessages) {
+        if (useApiCommands) {
             viewModelScope.launch {
                 try {
-                    if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                        graphQLRepository.sendMessage(networkLibrary, gqlHeaders, channelId, message.toString(), replyId).also { response ->
-                            if (enableIntegrity && integrity.value == null) {
-                                response.errors?.find { it.message == "failed integrity check" }?.let {
-                                    integrity.value = "refresh"
-                                    return@launch
-                                }
-                            }
-                        }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                    if (replyId == null && message.startsWith("/")) {
+                        sendCommand(message, networkLibrary, gqlHeaders, helixHeaders, accountId, channelId, channelLogin, useApiChatMessages, enableIntegrity)
                     } else {
-                        if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            helixRepository.sendMessage(networkLibrary, helixHeaders, accountId, channelId, message.toString(), replyId)
-                        } else null
-                    }?.let {
-                        onMessage(ChatMessage(systemMsg = it))
+                        sendMessage(message, networkLibrary, gqlHeaders, helixHeaders, accountId, channelId, useApiChatMessages, enableIntegrity, replyId)
                     }
                 } catch (e: Exception) {
 
                 }
             }
         } else {
-            chatWriteIRC?.send(message, replyId) ?: chatWriteWebSocketOkHttp?.send(message, replyId) ?: chatWriteWebSocket?.send(message, replyId)
-        }
-        val usedEmotes = hashSetOf<RecentEmote>()
-        val currentTime = System.currentTimeMillis()
-        message.split(' ').forEach { word ->
-            allEmotes.find { it.name == word }?.let { usedEmotes.add(RecentEmote(word, currentTime)) }
-        }
-        if (usedEmotes.isNotEmpty()) {
-            viewModelScope.launch {
-                playerRepository.insertRecentEmotes(usedEmotes)
+            if (replyId == null && (message == "/dc" || message == "/disconnect")) {
+                disconnect()
+            } else {
+                viewModelScope.launch {
+                    try {
+                        sendMessage(message, networkLibrary, gqlHeaders, helixHeaders, accountId, channelId, useApiChatMessages, enableIntegrity, replyId)
+                    } catch (e: Exception) {
+
+                    }
+                }
             }
         }
     }
 
-    private fun sendCommand(message: CharSequence, networkLibrary: String?, gqlHeaders: Map<String, String>, helixHeaders: Map<String, String>, accountId: String?, channelId: String?, channelLogin: String?, useApiChatMessages: Boolean, enableIntegrity: Boolean) {
+    private suspend fun sendMessage(message: CharSequence, networkLibrary: String?, gqlHeaders: Map<String, String>, helixHeaders: Map<String, String>, accountId: String?, channelId: String?, useApiChatMessages: Boolean, enableIntegrity: Boolean, replyId: String? = null) {
+        if (useApiChatMessages) {
+            if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                graphQLRepository.sendMessage(networkLibrary, gqlHeaders, channelId, message.toString(), replyId).also { response ->
+                    if (enableIntegrity) {
+                        response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                            integrity.emit("refresh")
+                            return
+                        }
+                    }
+                }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+            } else {
+                if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                    helixRepository.sendMessage(networkLibrary, helixHeaders, accountId, channelId, message.toString(), replyId)
+                } else null
+            }?.let {
+                onMessage(ChatMessage(systemMsg = it))
+            }
+        } else {
+            chatWriteIRCSocket?.send(message, replyId) ?: chatWriteWebSocket?.send(message, replyId)
+        }
+        val usedEmotes = hashSetOf<RecentEmote>()
+        val currentTime = System.currentTimeMillis()
+        synchronized(allEmotes) {
+            message.split(' ').forEach { word ->
+                allEmotes.find { it == word }?.let { usedEmotes.add(RecentEmote(word, currentTime)) }
+            }
+        }
+        if (usedEmotes.isNotEmpty()) {
+            playerRepository.insertRecentEmotes(usedEmotes)
+        }
+    }
+
+    private suspend fun sendCommand(message: CharSequence, networkLibrary: String?, gqlHeaders: Map<String, String>, helixHeaders: Map<String, String>, accountId: String?, channelId: String?, channelLogin: String?, useApiChatMessages: Boolean, enableIntegrity: Boolean) {
         val command = message.toString().substringBefore(" ")
         when {
             command.startsWith("/announce", true) -> {
                 val splits = message.split(" ", limit = 2)
-                if (splits.size >= 2) {
-                    viewModelScope.launch {
-                        if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            graphQLRepository.sendAnnouncement(networkLibrary, gqlHeaders, channelId, splits[1], splits[0].substringAfter("/announce", "").ifBlank { null }).also { response ->
-                                if (enableIntegrity && integrity.value == null) {
-                                    response.errors?.find { it.message == "failed integrity check" }?.let {
-                                        integrity.value = "refresh"
-                                        return@launch
-                                    }
+                val color = splits.getOrNull(0)?.lowercase()?.substringAfter("/announce", "")?.takeIf { it.isNotBlank() }
+                val message = splits.getOrNull(1)?.takeIf { it.isNotBlank() }
+                if (message != null) {
+                    if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        graphQLRepository.sendAnnouncement(networkLibrary, gqlHeaders, channelId, message, color).also { response ->
+                            if (enableIntegrity) {
+                                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                    integrity.emit("refresh")
+                                    return
                                 }
-                            }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                        } else {
-                            if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                                helixRepository.sendAnnouncement(networkLibrary, helixHeaders, channelId, accountId, splits[1], splits[0].substringAfter("/announce", "").ifBlank { null })
-                            } else null
-                        }?.let {
-                            onMessage(ChatMessage(systemMsg = it))
-                        }
+                            }
+                        }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                    } else {
+                        if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                            helixRepository.sendAnnouncement(networkLibrary, helixHeaders, channelId, accountId, message, color)
+                        } else null
+                    }?.let {
+                        onMessage(ChatMessage(systemMsg = it))
                     }
                 }
             }
             command.equals("/ban", true) -> {
                 val splits = message.split(" ", limit = 3)
-                if (splits.size >= 2) {
-                    viewModelScope.launch {
-                        if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            graphQLRepository.banUser(networkLibrary, gqlHeaders, channelId, splits[1],
-                                reason = if (splits.size >= 3) splits[2] else null
-                            ).also { response ->
-                                if (enableIntegrity && integrity.value == null) {
-                                    response.errors?.find { it.message == "failed integrity check" }?.let {
-                                        integrity.value = "refresh"
-                                        return@launch
-                                    }
+                val targetLogin = splits.getOrNull(1)?.removePrefix("@")?.takeIf { it.isNotBlank() }
+                val reason = splits.getOrNull(2)?.takeIf { it.isNotBlank() }
+                if (targetLogin != null) {
+                    if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        graphQLRepository.banUser(networkLibrary, gqlHeaders, channelId, targetLogin, reason = reason).also { response ->
+                            if (enableIntegrity) {
+                                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                    integrity.emit("refresh")
+                                    return
                                 }
-                            }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                        } else {
-                            if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                                val targetId = helixRepository.getUsers(
-                                    networkLibrary = networkLibrary,
-                                    headers = helixHeaders,
-                                    logins = listOf(splits[1])
-                                ).data.firstOrNull()?.channelId
-                                helixRepository.banUser(networkLibrary, helixHeaders, channelId, accountId, targetId,
-                                    reason = if (splits.size >= 3) splits[2] else null
-                                )
-                            } else null
-                        }?.let {
-                            onMessage(ChatMessage(systemMsg = it))
-                        }
+                            }
+                        }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                    } else {
+                        if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                            val targetId = helixRepository.getUsers(
+                                networkLibrary = networkLibrary,
+                                headers = helixHeaders,
+                                logins = listOf(targetLogin)
+                            ).data.firstOrNull()?.id
+                            helixRepository.banUser(networkLibrary, helixHeaders, channelId, accountId, targetId, reason = reason)
+                        } else null
+                    }?.let {
+                        onMessage(ChatMessage(systemMsg = it))
                     }
                 }
             }
             command.equals("/unban", true) -> {
                 val splits = message.split(" ")
-                if (splits.size >= 2) {
-                    viewModelScope.launch {
-                        if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            graphQLRepository.unbanUser(networkLibrary, gqlHeaders, channelId, splits[1]).also { response ->
-                                if (enableIntegrity && integrity.value == null) {
-                                    response.errors?.find { it.message == "failed integrity check" }?.let {
-                                        integrity.value = "refresh"
-                                        return@launch
-                                    }
+                val targetLogin = splits.getOrNull(1)?.removePrefix("@")?.takeIf { it.isNotBlank() }
+                if (targetLogin != null) {
+                    if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        graphQLRepository.unbanUser(networkLibrary, gqlHeaders, channelId, targetLogin).also { response ->
+                            if (enableIntegrity) {
+                                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                    integrity.emit("refresh")
+                                    return
                                 }
-                            }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                        } else {
-                            if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                                val targetId = helixRepository.getUsers(
-                                    networkLibrary = networkLibrary,
-                                    headers = helixHeaders,
-                                    logins = listOf(splits[1])
-                                ).data.firstOrNull()?.channelId
-                                helixRepository.unbanUser(networkLibrary, helixHeaders, channelId, accountId, targetId)
-                            } else null
-                        }?.let {
-                            onMessage(ChatMessage(systemMsg = it))
-                        }
+                            }
+                        }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                    } else {
+                        if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                            val targetId = helixRepository.getUsers(
+                                networkLibrary = networkLibrary,
+                                headers = helixHeaders,
+                                logins = listOf(targetLogin)
+                            ).data.firstOrNull()?.id
+                            helixRepository.unbanUser(networkLibrary, helixHeaders, channelId, accountId, targetId)
+                        } else null
+                    }?.let {
+                        onMessage(ChatMessage(systemMsg = it))
                     }
                 }
             }
             command.equals("/clear", true) -> {
                 if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                    viewModelScope.launch {
-                        helixRepository.deleteMessages(networkLibrary, helixHeaders, channelId, accountId)?.let {
-                            onMessage(ChatMessage(systemMsg = it))
-                        }
+                    helixRepository.deleteMessages(networkLibrary, helixHeaders, channelId, accountId)?.let {
+                        onMessage(ChatMessage(systemMsg = it))
                     }
                 } else {
                     if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
@@ -1651,39 +2091,37 @@ class ChatViewModel @Inject constructor(
             }
             command.equals("/color", true) -> {
                 val splits = message.split(" ")
-                viewModelScope.launch {
-                    if (splits.size >= 2) {
-                        if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            graphQLRepository.updateChatColor(networkLibrary, gqlHeaders, splits[1]).also { response ->
-                                if (enableIntegrity && integrity.value == null) {
-                                    response.errors?.find { it.message == "failed integrity check" }?.let {
-                                        integrity.value = "refresh"
-                                        return@launch
-                                    }
+                val color = splits.getOrNull(1)?.takeIf { it.isNotBlank() }
+                if (color != null) {
+                    if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        graphQLRepository.updateChatColor(networkLibrary, gqlHeaders, color).also { response ->
+                            if (enableIntegrity) {
+                                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                    integrity.emit("refresh")
+                                    return
                                 }
-                            }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                        } else {
-                            if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                                helixRepository.updateChatColor(networkLibrary, helixHeaders, accountId, splits[1])
-                            } else null
-                        }
+                            }
+                        }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
                     } else {
                         if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            helixRepository.getChatColor(networkLibrary, helixHeaders, accountId)
+                            helixRepository.updateChatColor(networkLibrary, helixHeaders, accountId, color)
                         } else null
-                    }?.let {
-                        onMessage(ChatMessage(systemMsg = it))
                     }
+                } else {
+                    if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        helixRepository.getChatColor(networkLibrary, helixHeaders, accountId)
+                    } else null
+                }?.let {
+                    onMessage(ChatMessage(systemMsg = it))
                 }
             }
             command.equals("/commercial", true) -> {
                 if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
                     val splits = message.split(" ")
-                    if (splits.size >= 2) {
-                        viewModelScope.launch {
-                            helixRepository.startCommercial(networkLibrary, helixHeaders, channelId, splits[1])?.let {
-                                onMessage(ChatMessage(systemMsg = it))
-                            }
+                    val length = splits.getOrNull(1)?.takeIf { it.isNotBlank() }
+                    if (length != null) {
+                        helixRepository.startCommercial(networkLibrary, helixHeaders, channelId, length)?.let {
+                            onMessage(ChatMessage(systemMsg = it))
                         }
                     }
                 } else {
@@ -1695,11 +2133,10 @@ class ChatViewModel @Inject constructor(
             command.equals("/delete", true) -> {
                 if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
                     val splits = message.split(" ")
-                    if (splits.size >= 2) {
-                        viewModelScope.launch {
-                            helixRepository.deleteMessages(networkLibrary, helixHeaders, channelId, accountId, splits[1])?.let {
-                                onMessage(ChatMessage(systemMsg = it))
-                            }
+                    val messageId = splits.getOrNull(1)?.takeIf { it.isNotBlank() }
+                    if (messageId != null) {
+                        helixRepository.deleteMessages(networkLibrary, helixHeaders, channelId, accountId, messageId)?.let {
+                            onMessage(ChatMessage(systemMsg = it))
                         }
                     }
                 } else {
@@ -1710,296 +2147,278 @@ class ChatViewModel @Inject constructor(
             }
             command.equals("/disconnect", true) -> disconnect()
             command.equals("/emoteonly", true) -> {
-                viewModelScope.launch {
-                    if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                        graphQLRepository.updateChatSettings(networkLibrary, gqlHeaders, channelId, emote = true).also { response ->
-                            if (enableIntegrity && integrity.value == null) {
-                                response.errors?.find { it.message == "failed integrity check" }?.let {
-                                    integrity.value = "refresh"
-                                    return@launch
-                                }
+                if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                    graphQLRepository.updateChatSettings(networkLibrary, gqlHeaders, channelId, emote = true).also { response ->
+                        if (enableIntegrity) {
+                            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                integrity.emit("refresh")
+                                return
                             }
-                        }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                    } else {
-                        if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId, emote = true)
-                        } else null
-                    }?.let {
-                        onMessage(ChatMessage(systemMsg = it))
-                    }
+                        }
+                    }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                } else {
+                    if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId, emote = true)
+                    } else null
+                }?.let {
+                    onMessage(ChatMessage(systemMsg = it))
                 }
             }
             command.equals("/emoteonlyoff", true) -> {
-                viewModelScope.launch {
-                    if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                        graphQLRepository.updateChatSettings(networkLibrary, gqlHeaders, channelId, emote = false).also { response ->
-                            if (enableIntegrity && integrity.value == null) {
-                                response.errors?.find { it.message == "failed integrity check" }?.let {
-                                    integrity.value = "refresh"
-                                    return@launch
-                                }
+                if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                    graphQLRepository.updateChatSettings(networkLibrary, gqlHeaders, channelId, emote = false).also { response ->
+                        if (enableIntegrity) {
+                            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                integrity.emit("refresh")
+                                return
                             }
-                        }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                    } else {
-                        if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId, emote = false)
-                        } else null
-                    }?.let {
-                        onMessage(ChatMessage(systemMsg = it))
-                    }
+                        }
+                    }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                } else {
+                    if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId, emote = false)
+                    } else null
+                }?.let {
+                    onMessage(ChatMessage(systemMsg = it))
                 }
             }
             command.equals("/followers", true) -> {
                 val splits = message.split(" ")
-                val duration = if (splits.size >= 2) splits[1].toIntOrNull() else null
-                viewModelScope.launch {
-                    if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                        graphQLRepository.setFollowersOnlyMode(networkLibrary, gqlHeaders, channelId, duration ?: 0).also { response ->
-                            if (enableIntegrity && integrity.value == null) {
-                                response.errors?.find { it.message == "failed integrity check" }?.let {
-                                    integrity.value = "refresh"
-                                    return@launch
-                                }
+                val duration = splits.getOrNull(1)?.takeIf { it.isNotBlank() }?.toIntOrNull()
+                if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                    graphQLRepository.setFollowersOnlyMode(networkLibrary, gqlHeaders, channelId, duration ?: 0).also { response ->
+                        if (enableIntegrity) {
+                            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                integrity.emit("refresh")
+                                return
                             }
-                        }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                    } else {
-                        if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId,
-                                followers = true,
-                                followersDuration = duration
-                            )
-                        } else null
-                    }?.let {
-                        onMessage(ChatMessage(systemMsg = it))
-                    }
+                        }
+                    }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                } else {
+                    if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId,
+                            followers = true,
+                            followersDuration = duration
+                        )
+                    } else null
+                }?.let {
+                    onMessage(ChatMessage(systemMsg = it))
                 }
             }
             command.equals("/followersoff", true) -> {
-                viewModelScope.launch {
-                    if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                        graphQLRepository.setFollowersOnlyMode(networkLibrary, gqlHeaders, channelId, -1).also { response ->
-                            if (enableIntegrity && integrity.value == null) {
-                                response.errors?.find { it.message == "failed integrity check" }?.let {
-                                    integrity.value = "refresh"
-                                    return@launch
-                                }
+                if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                    graphQLRepository.setFollowersOnlyMode(networkLibrary, gqlHeaders, channelId, -1).also { response ->
+                        if (enableIntegrity) {
+                            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                integrity.emit("refresh")
+                                return
                             }
-                        }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                    } else {
-                        if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId, followers = false)
-                        } else null
-                    }?.let {
-                        onMessage(ChatMessage(systemMsg = it))
-                    }
+                        }
+                    }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                } else {
+                    if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId, followers = false)
+                    } else null
+                }?.let {
+                    onMessage(ChatMessage(systemMsg = it))
                 }
             }
             command.equals("/marker", true) -> {
                 val splits = message.split(" ", limit = 2)
-                viewModelScope.launch {
+                val description = splits.getOrNull(1)?.takeIf { it.isNotBlank() }
+                if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                    graphQLRepository.createStreamMarker(networkLibrary, gqlHeaders, channelLogin).also { response ->
+                        if (enableIntegrity) {
+                            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                integrity.emit("refresh")
+                                return
+                            }
+                        }
+                    }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                } else {
+                    if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        helixRepository.createStreamMarker(networkLibrary, helixHeaders, channelId, description)
+                    } else null
+                }?.let {
+                    onMessage(ChatMessage(systemMsg = it))
+                }
+            }
+            command.equals("/mod", true) -> {
+                val splits = message.split(" ")
+                val targetLogin = splits.getOrNull(1)?.removePrefix("@")?.takeIf { it.isNotBlank() }
+                if (targetLogin != null) {
                     if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                        graphQLRepository.createStreamMarker(networkLibrary, gqlHeaders, channelLogin).also { response ->
-                            if (enableIntegrity && integrity.value == null) {
-                                response.errors?.find { it.message == "failed integrity check" }?.let {
-                                    integrity.value = "refresh"
-                                    return@launch
+                        graphQLRepository.addModerator(networkLibrary, gqlHeaders, channelId, targetLogin).also { response ->
+                            if (enableIntegrity) {
+                                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                    integrity.emit("refresh")
+                                    return
                                 }
                             }
                         }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
                     } else {
                         if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            helixRepository.createStreamMarker(networkLibrary, helixHeaders, channelId, if (splits.size >= 2) splits[1] else null)
+                            val targetId = helixRepository.getUsers(
+                                networkLibrary = networkLibrary,
+                                headers = helixHeaders,
+                                logins = listOf(targetLogin)
+                            ).data.firstOrNull()?.id
+                            helixRepository.addModerator(networkLibrary, helixHeaders, channelId, targetId)
                         } else null
                     }?.let {
                         onMessage(ChatMessage(systemMsg = it))
-                    }
-                }
-            }
-            command.equals("/mod", true) -> {
-                val splits = message.split(" ")
-                if (splits.size >= 2) {
-                    viewModelScope.launch {
-                        if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            graphQLRepository.addModerator(networkLibrary, gqlHeaders, channelId, splits[1]).also { response ->
-                                if (enableIntegrity && integrity.value == null) {
-                                    response.errors?.find { it.message == "failed integrity check" }?.let {
-                                        integrity.value = "refresh"
-                                        return@launch
-                                    }
-                                }
-                            }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                        } else {
-                            if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                                val targetId = helixRepository.getUsers(
-                                    networkLibrary = networkLibrary,
-                                    headers = helixHeaders,
-                                    logins = listOf(splits[1])
-                                ).data.firstOrNull()?.channelId
-                                helixRepository.addModerator(networkLibrary, helixHeaders, channelId, targetId)
-                            } else null
-                        }?.let {
-                            onMessage(ChatMessage(systemMsg = it))
-                        }
                     }
                 }
             }
             command.equals("/unmod", true) -> {
                 val splits = message.split(" ")
-                if (splits.size >= 2) {
-                    viewModelScope.launch {
-                        if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            graphQLRepository.removeModerator(networkLibrary, gqlHeaders, channelId, splits[1]).also { response ->
-                                if (enableIntegrity && integrity.value == null) {
-                                    response.errors?.find { it.message == "failed integrity check" }?.let {
-                                        integrity.value = "refresh"
-                                        return@launch
-                                    }
-                                }
-                            }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                        } else {
-                            if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                                val targetId = helixRepository.getUsers(
-                                    networkLibrary = networkLibrary,
-                                    headers = helixHeaders,
-                                    logins = listOf(splits[1])
-                                ).data.firstOrNull()?.channelId
-                                helixRepository.removeModerator(networkLibrary, helixHeaders, channelId, targetId)
-                            } else null
-                        }?.let {
-                            onMessage(ChatMessage(systemMsg = it))
-                        }
-                    }
-                }
-            }
-            command.equals("/mods", true) -> {
-                viewModelScope.launch {
-                    graphQLRepository.getModerators(networkLibrary, gqlHeaders, channelLogin).also { response ->
-                        if (enableIntegrity && integrity.value == null) {
-                            response.errors?.find { it.message == "failed integrity check" }?.let {
-                                integrity.value = "refresh"
-                                return@launch
-                            }
-                        }
-                    }.let {
-                        onMessage(ChatMessage(systemMsg = it.data?.user?.mods?.edges?.map { it.node.login }?.toString() ?: it.toString()))
-                    }
-                }
-            }
-            command.equals("/raid", true) -> {
-                val splits = message.split(" ")
-                if (splits.size >= 2) {
-                    viewModelScope.launch {
-                        if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            val targetId = try {
-                                graphQLRepository.loadQueryUser(networkLibrary, gqlHeaders, login = splits[1]).also { response ->
-                                    if (enableIntegrity && integrity.value == null) {
-                                        response.errors?.find { it.message == "failed integrity check" }?.let {
-                                            integrity.value = "refresh"
-                                            return@launch
-                                        }
-                                    }
-                                }.data!!.user?.id
-                            } catch (e: Exception) {
-                                helixRepository.getUsers(
-                                    networkLibrary = networkLibrary,
-                                    headers = helixHeaders,
-                                    logins = listOf(splits[1])
-                                ).data.firstOrNull()?.channelId
-                            }
-                            graphQLRepository.startRaid(networkLibrary, gqlHeaders, channelId, targetId).also { response ->
-                                if (enableIntegrity && integrity.value == null) {
-                                    response.errors?.find { it.message == "failed integrity check" }?.let {
-                                        integrity.value = "refresh"
-                                        return@launch
-                                    }
-                                }
-                            }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                        } else {
-                            if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                                val targetId = helixRepository.getUsers(
-                                    networkLibrary = networkLibrary,
-                                    headers = helixHeaders,
-                                    logins = listOf(splits[1])
-                                ).data.firstOrNull()?.channelId
-                                helixRepository.startRaid(networkLibrary, helixHeaders, channelId, targetId)
-                            } else null
-                        }?.let {
-                            onMessage(ChatMessage(systemMsg = it))
-                        }
-                    }
-                }
-            }
-            command.equals("/unraid", true) -> {
-                viewModelScope.launch {
+                val targetLogin = splits.getOrNull(1)?.removePrefix("@")?.takeIf { it.isNotBlank() }
+                if (targetLogin != null) {
                     if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                        graphQLRepository.cancelRaid(networkLibrary, gqlHeaders, channelId).also { response ->
-                            if (enableIntegrity && integrity.value == null) {
-                                response.errors?.find { it.message == "failed integrity check" }?.let {
-                                    integrity.value = "refresh"
-                                    return@launch
+                        graphQLRepository.removeModerator(networkLibrary, gqlHeaders, channelId, targetLogin).also { response ->
+                            if (enableIntegrity) {
+                                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                    integrity.emit("refresh")
+                                    return
                                 }
                             }
                         }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
                     } else {
                         if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            helixRepository.cancelRaid(networkLibrary, helixHeaders, channelId)
+                            val targetId = helixRepository.getUsers(
+                                networkLibrary = networkLibrary,
+                                headers = helixHeaders,
+                                logins = listOf(targetLogin)
+                            ).data.firstOrNull()?.id
+                            helixRepository.removeModerator(networkLibrary, helixHeaders, channelId, targetId)
                         } else null
                     }?.let {
                         onMessage(ChatMessage(systemMsg = it))
                     }
+                }
+            }
+            command.equals("/mods", true) -> {
+                graphQLRepository.getModerators(networkLibrary, gqlHeaders, channelLogin).also { response ->
+                    if (enableIntegrity) {
+                        response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                            integrity.emit("refresh")
+                            return
+                        }
+                    }
+                }.let {
+                    onMessage(ChatMessage(systemMsg = it.data?.user?.mods?.edges?.map { it.node.login }?.toString() ?: it.toString()))
+                }
+            }
+            command.equals("/raid", true) -> {
+                val splits = message.split(" ")
+                val targetLogin = splits.getOrNull(1)?.removePrefix("@")?.takeIf { it.isNotBlank() }
+                if (targetLogin != null) {
+                    if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        val targetId = try {
+                            graphQLRepository.loadQueryUser(networkLibrary, gqlHeaders, login = targetLogin).also { response ->
+                                if (enableIntegrity) {
+                                    response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                        integrity.emit("refresh")
+                                        return
+                                    }
+                                }
+                            }.data!!.user?.id
+                        } catch (e: Exception) {
+                            if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                                helixRepository.getUsers(
+                                    networkLibrary = networkLibrary,
+                                    headers = helixHeaders,
+                                    logins = listOf(targetLogin)
+                                ).data.firstOrNull()?.id
+                            } else null
+                        }
+                        if (targetId != null) {
+                            graphQLRepository.startRaid(networkLibrary, gqlHeaders, channelId, targetId).also { response ->
+                                if (enableIntegrity) {
+                                    response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                        integrity.emit("refresh")
+                                        return
+                                    }
+                                }
+                            }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                        } else null
+                    } else {
+                        if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                            val targetId = helixRepository.getUsers(
+                                networkLibrary = networkLibrary,
+                                headers = helixHeaders,
+                                logins = listOf(targetLogin)
+                            ).data.firstOrNull()?.id
+                            helixRepository.startRaid(networkLibrary, helixHeaders, channelId, targetId)
+                        } else null
+                    }?.let {
+                        onMessage(ChatMessage(systemMsg = it))
+                    }
+                }
+            }
+            command.equals("/unraid", true) -> {
+                if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                    graphQLRepository.cancelRaid(networkLibrary, gqlHeaders, channelId).also { response ->
+                        if (enableIntegrity) {
+                            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                integrity.emit("refresh")
+                                return
+                            }
+                        }
+                    }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                } else {
+                    if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        helixRepository.cancelRaid(networkLibrary, helixHeaders, channelId)
+                    } else null
+                }?.let {
+                    onMessage(ChatMessage(systemMsg = it))
                 }
             }
             command.equals("/slow", true) -> {
                 val splits = message.split(" ")
                 val duration = if (splits.size >= 2) splits[1].toIntOrNull() else null
-                viewModelScope.launch {
-                    if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                        graphQLRepository.setSlowMode(networkLibrary, gqlHeaders, channelId, duration ?: 30).also { response ->
-                            if (enableIntegrity && integrity.value == null) {
-                                response.errors?.find { it.message == "failed integrity check" }?.let {
-                                    integrity.value = "refresh"
-                                    return@launch
-                                }
+                if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                    graphQLRepository.setSlowMode(networkLibrary, gqlHeaders, channelId, duration ?: 30).also { response ->
+                        if (enableIntegrity) {
+                            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                integrity.emit("refresh")
+                                return
                             }
-                        }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                    } else {
-                        if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId,
-                                slow = true,
-                                slowDuration = duration
-                            )
-                        } else null
-                    }?.let {
-                        onMessage(ChatMessage(systemMsg = it))
-                    }
+                        }
+                    }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                } else {
+                    if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId,
+                            slow = true,
+                            slowDuration = duration
+                        )
+                    } else null
+                }?.let {
+                    onMessage(ChatMessage(systemMsg = it))
                 }
             }
             command.equals("/slowoff", true) -> {
-                viewModelScope.launch {
-                    if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                        graphQLRepository.setSlowMode(networkLibrary, gqlHeaders, channelId, 0).also { response ->
-                            if (enableIntegrity && integrity.value == null) {
-                                response.errors?.find { it.message == "failed integrity check" }?.let {
-                                    integrity.value = "refresh"
-                                    return@launch
-                                }
+                if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                    graphQLRepository.setSlowMode(networkLibrary, gqlHeaders, channelId, 0).also { response ->
+                        if (enableIntegrity) {
+                            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                integrity.emit("refresh")
+                                return
                             }
-                        }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                    } else {
-                        if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId, slow = false)
-                        } else null
-                    }?.let {
-                        onMessage(ChatMessage(systemMsg = it))
-                    }
+                        }
+                    }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                } else {
+                    if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId, slow = false)
+                    } else null
+                }?.let {
+                    onMessage(ChatMessage(systemMsg = it))
                 }
             }
             command.equals("/subscribers", true) -> {
                 if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                    viewModelScope.launch {
-                        helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId, subs = true)?.let {
-                            onMessage(ChatMessage(systemMsg = it))
-                        }
+                    helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId, subs = true)?.let {
+                        onMessage(ChatMessage(systemMsg = it))
                     }
                 } else {
                     if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
@@ -2009,10 +2428,8 @@ class ChatViewModel @Inject constructor(
             }
             command.equals("/subscribersoff", true) -> {
                 if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                    viewModelScope.launch {
-                        helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId, subs = false)?.let {
-                            onMessage(ChatMessage(systemMsg = it))
-                        }
+                    helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId, subs = false)?.let {
+                        onMessage(ChatMessage(systemMsg = it))
                     }
                 } else {
                     if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
@@ -2022,72 +2439,64 @@ class ChatViewModel @Inject constructor(
             }
             command.equals("/timeout", true) -> {
                 val splits = message.split(" ", limit = 4)
-                if (splits.size >= 2) {
-                    viewModelScope.launch {
-                        if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            graphQLRepository.banUser(networkLibrary, gqlHeaders, channelId, splits[1],
-                                duration = if (splits.size >= 3) splits[2] else "10m",
-                                reason = if (splits.size >= 4) splits[3] else null
-                            ).also { response ->
-                                if (enableIntegrity && integrity.value == null) {
-                                    response.errors?.find { it.message == "failed integrity check" }?.let {
-                                        integrity.value = "refresh"
-                                        return@launch
-                                    }
+                val targetLogin = splits.getOrNull(1)?.removePrefix("@")?.takeIf { it.isNotBlank() }
+                val duration = splits.getOrNull(2)?.takeIf { it.isNotBlank() }
+                val reason = splits.getOrNull(3)?.takeIf { it.isNotBlank() }
+                if (targetLogin != null) {
+                    if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        graphQLRepository.banUser(networkLibrary, gqlHeaders, channelId, targetLogin, duration ?: "10m", reason).also { response ->
+                            if (enableIntegrity) {
+                                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                    integrity.emit("refresh")
+                                    return
                                 }
-                            }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                        } else {
-                            if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                                val targetId = helixRepository.getUsers(
-                                    networkLibrary = networkLibrary,
-                                    headers = helixHeaders,
-                                    logins = listOf(splits[1])
-                                ).data.firstOrNull()?.channelId
-                                helixRepository.banUser(networkLibrary, helixHeaders, channelId, accountId, targetId,
-                                    duration = if (splits.size >= 3) splits[2] else "600",
-                                    reason = if (splits.size >= 4) splits[3] else null
-                                )
-                            } else null
-                        }?.let {
-                            onMessage(ChatMessage(systemMsg = it))
-                        }
+                            }
+                        }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                    } else {
+                        if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                            val targetId = helixRepository.getUsers(
+                                networkLibrary = networkLibrary,
+                                headers = helixHeaders,
+                                logins = listOf(targetLogin)
+                            ).data.firstOrNull()?.id
+                            helixRepository.banUser(networkLibrary, helixHeaders, channelId, accountId, targetId, duration ?: "600", reason)
+                        } else null
+                    }?.let {
+                        onMessage(ChatMessage(systemMsg = it))
                     }
                 }
             }
             command.equals("/untimeout", true) -> {
                 val splits = message.split(" ")
-                if (splits.size >= 2) {
-                    viewModelScope.launch {
-                        if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            graphQLRepository.unbanUser(networkLibrary, gqlHeaders, channelId, splits[1]).also { response ->
-                                if (enableIntegrity && integrity.value == null) {
-                                    response.errors?.find { it.message == "failed integrity check" }?.let {
-                                        integrity.value = "refresh"
-                                        return@launch
-                                    }
+                val targetLogin = splits.getOrNull(1)?.removePrefix("@")?.takeIf { it.isNotBlank() }
+                if (targetLogin != null) {
+                    if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        graphQLRepository.unbanUser(networkLibrary, gqlHeaders, channelId, targetLogin).also { response ->
+                            if (enableIntegrity) {
+                                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                    integrity.emit("refresh")
+                                    return
                                 }
-                            }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                        } else {
-                            if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                                val targetId = helixRepository.getUsers(
-                                    networkLibrary = networkLibrary,
-                                    headers = helixHeaders,
-                                    logins = listOf(splits[1])
-                                ).data.firstOrNull()?.channelId
-                                helixRepository.unbanUser(networkLibrary, helixHeaders, channelId, accountId, targetId)
-                            } else null
-                        }?.let {
-                            onMessage(ChatMessage(systemMsg = it))
-                        }
+                            }
+                        }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                    } else {
+                        if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                            val targetId = helixRepository.getUsers(
+                                networkLibrary = networkLibrary,
+                                headers = helixHeaders,
+                                logins = listOf(targetLogin)
+                            ).data.firstOrNull()?.id
+                            helixRepository.unbanUser(networkLibrary, helixHeaders, channelId, accountId, targetId)
+                        } else null
+                    }?.let {
+                        onMessage(ChatMessage(systemMsg = it))
                     }
                 }
             }
             command.equals("/uniquechat", true) -> {
                 if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                    viewModelScope.launch {
-                        helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId, unique = true)?.let {
-                            onMessage(ChatMessage(systemMsg = it))
-                        }
+                    helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId, unique = true)?.let {
+                        onMessage(ChatMessage(systemMsg = it))
                     }
                 } else {
                     if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
@@ -2097,10 +2506,8 @@ class ChatViewModel @Inject constructor(
             }
             command.equals("/uniquechatoff", true) -> {
                 if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                    viewModelScope.launch {
-                        helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId, unique = false)?.let {
-                            onMessage(ChatMessage(systemMsg = it))
-                        }
+                    helixRepository.updateChatSettings(networkLibrary, helixHeaders, channelId, accountId, unique = false)?.let {
+                        onMessage(ChatMessage(systemMsg = it))
                     }
                 } else {
                     if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
@@ -2110,87 +2517,83 @@ class ChatViewModel @Inject constructor(
             }
             command.equals("/vip", true) -> {
                 val splits = message.split(" ")
-                if (splits.size >= 2) {
-                    viewModelScope.launch {
-                        if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            graphQLRepository.addVip(networkLibrary, gqlHeaders, channelId, splits[1]).also { response ->
-                                if (enableIntegrity && integrity.value == null) {
-                                    response.errors?.find { it.message == "failed integrity check" }?.let {
-                                        integrity.value = "refresh"
-                                        return@launch
-                                    }
+                val targetLogin = splits.getOrNull(1)?.removePrefix("@")?.takeIf { it.isNotBlank() }
+                if (targetLogin != null) {
+                    if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        graphQLRepository.addVip(networkLibrary, gqlHeaders, channelId, targetLogin).also { response ->
+                            if (enableIntegrity) {
+                                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                    integrity.emit("refresh")
+                                    return
                                 }
-                            }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                        } else {
-                            if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                                val targetId = helixRepository.getUsers(
-                                    networkLibrary = networkLibrary,
-                                    headers = helixHeaders,
-                                    logins = listOf(splits[1])
-                                ).data.firstOrNull()?.channelId
-                                helixRepository.addVip(networkLibrary, helixHeaders, channelId, targetId)
-                            } else null
-                        }?.let {
-                            onMessage(ChatMessage(systemMsg = it))
-                        }
+                            }
+                        }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                    } else {
+                        if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                            val targetId = helixRepository.getUsers(
+                                networkLibrary = networkLibrary,
+                                headers = helixHeaders,
+                                logins = listOf(targetLogin)
+                            ).data.firstOrNull()?.id
+                            helixRepository.addVip(networkLibrary, helixHeaders, channelId, targetId)
+                        } else null
+                    }?.let {
+                        onMessage(ChatMessage(systemMsg = it))
                     }
                 }
             }
             command.equals("/unvip", true) -> {
                 val splits = message.split(" ")
-                if (splits.size >= 2) {
-                    viewModelScope.launch {
-                        if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                            graphQLRepository.removeVip(networkLibrary, gqlHeaders, channelId, splits[1]).also { response ->
-                                if (enableIntegrity && integrity.value == null) {
-                                    response.errors?.find { it.message == "failed integrity check" }?.let {
-                                        integrity.value = "refresh"
-                                        return@launch
-                                    }
+                val targetLogin = splits.getOrNull(1)?.removePrefix("@")?.takeIf { it.isNotBlank() }
+                if (targetLogin != null) {
+                    if (!gqlHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                        graphQLRepository.removeVip(networkLibrary, gqlHeaders, channelId, targetLogin).also { response ->
+                            if (enableIntegrity) {
+                                response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                                    integrity.emit("refresh")
+                                    return
                                 }
-                            }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
-                        } else {
-                            if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
-                                val targetId = helixRepository.getUsers(
-                                    networkLibrary = networkLibrary,
-                                    headers = helixHeaders,
-                                    logins = listOf(splits[1])
-                                ).data.firstOrNull()?.channelId
-                                helixRepository.removeVip(networkLibrary, helixHeaders, channelId, targetId)
-                            } else null
-                        }?.let {
-                            onMessage(ChatMessage(systemMsg = it))
-                        }
+                            }
+                        }.takeIf { !it.errors.isNullOrEmpty() }?.toString()
+                    } else {
+                        if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
+                            val targetId = helixRepository.getUsers(
+                                networkLibrary = networkLibrary,
+                                headers = helixHeaders,
+                                logins = listOf(targetLogin)
+                            ).data.firstOrNull()?.id
+                            helixRepository.removeVip(networkLibrary, helixHeaders, channelId, targetId)
+                        } else null
+                    }?.let {
+                        onMessage(ChatMessage(systemMsg = it))
                     }
                 }
             }
             command.equals("/vips", true) -> {
-                viewModelScope.launch {
-                    graphQLRepository.getVips(networkLibrary, gqlHeaders, channelLogin).also { response ->
-                        if (enableIntegrity && integrity.value == null) {
-                            response.errors?.find { it.message == "failed integrity check" }?.let {
-                                integrity.value = "refresh"
-                                return@launch
-                            }
+                graphQLRepository.getVips(networkLibrary, gqlHeaders, channelLogin).also { response ->
+                    if (enableIntegrity) {
+                        response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let {
+                            integrity.emit("refresh")
+                            return
                         }
-                    }.let {
-                        onMessage(ChatMessage(systemMsg = it.data?.user?.vips?.edges?.map { it.node.login }?.toString() ?: it.toString()))
                     }
+                }.let {
+                    onMessage(ChatMessage(systemMsg = it.data?.user?.vips?.edges?.map { it.node.login }?.toString() ?: it.toString()))
                 }
             }
             command.equals("/w", true) -> {
                 if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank()) {
                     val splits = message.split(" ", limit = 3)
-                    if (splits.size >= 3) {
-                        viewModelScope.launch {
-                            val targetId = helixRepository.getUsers(
-                                networkLibrary = networkLibrary,
-                                headers = helixHeaders,
-                                logins = listOf(splits[1])
-                            ).data.firstOrNull()?.channelId
-                            helixRepository.sendWhisper(networkLibrary, helixHeaders, accountId, targetId, splits[2])?.let {
-                                onMessage(ChatMessage(systemMsg = it))
-                            }
+                    val targetLogin = splits.getOrNull(1)?.removePrefix("@")?.takeIf { it.isNotBlank() }
+                    val message = splits.getOrNull(2)?.takeIf { it.isNotBlank() }
+                    if (targetLogin != null && message != null) {
+                        val targetId = helixRepository.getUsers(
+                            networkLibrary = networkLibrary,
+                            headers = helixHeaders,
+                            logins = listOf(targetLogin)
+                        ).data.firstOrNull()?.id
+                        helixRepository.sendWhisper(networkLibrary, helixHeaders, accountId, targetId, message)?.let {
+                            onMessage(ChatMessage(systemMsg = it))
                         }
                     }
                 }
@@ -2199,33 +2602,32 @@ class ChatViewModel @Inject constructor(
         }
     }
 
-    fun startReplayChat(videoId: String?, startTime: Int, chatUrl: String?, getCurrentPosition: () -> Long?, getCurrentSpeed: () -> Float?, channelId: String?, channelLogin: String?) {
+    fun startReplayChat(videoId: String?, createdAt: String?, startTime: Int, chatUrl: String?, getCurrentPosition: () -> Long?, getCurrentSpeed: () -> Float?, channelId: String?, channelLogin: String?) {
         stopReplayChat()
         if (!chatUrl.isNullOrBlank()) {
             chatReplayManagerLocal = ChatReplayManagerLocal(
+                createdAt = createdAt?.toLongOrNull() ?: createdAt?.let { Instant.parseOrNull(it)?.toEpochMilliseconds()?.takeIf { ms -> ms > 0 } },
                 getCurrentPosition = getCurrentPosition,
                 getCurrentSpeed = getCurrentSpeed,
-                onMessage = { onMessage(it) },
-                clearMessages = { _chatMessages.value = ArrayList() },
-                coroutineScope = viewModelScope
+                coroutineScope = viewModelScope,
+                listener = ChatReplayListener(),
             )
             readChatFile(chatUrl, channelId, channelLogin)
         } else {
             if (!videoId.isNullOrBlank()) {
                 chatReplayManager = ChatReplayManager(
-                    networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+                    networkLibrary = applicationContext.prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
                     gqlHeaders = TwitchApiHelper.getGQLHeaders(applicationContext, true),
                     graphQLRepository = graphQLRepository,
                     json = json,
                     enableIntegrity = applicationContext.prefs().getBoolean(C.ENABLE_INTEGRITY, false),
                     videoId = videoId,
+                    createdAt = createdAt?.let { Instant.parseOrNull(it)?.toEpochMilliseconds()?.takeIf { ms -> ms > 0 } },
                     startTime = startTime.times(1000L),
                     getCurrentPosition = getCurrentPosition,
                     getCurrentSpeed = getCurrentSpeed,
-                    onMessage = { onMessage(it) },
-                    clearMessages = { _chatMessages.value = ArrayList() },
-                    getIntegrityToken = { if (integrity.value == null) { integrity.value = "refresh" } },
-                    coroutineScope = viewModelScope
+                    coroutineScope = viewModelScope,
+                    listener = ChatReplayListener(),
                 )
             }
         }
@@ -2247,11 +2649,32 @@ class ChatViewModel @Inject constructor(
         chatReplayManager?.updateSpeed(speed) ?: chatReplayManagerLocal?.updateSpeed(speed)
     }
 
+    private inner class ChatReplayListener : ChatReplayManager.Listener {
+        override suspend fun onChatMessage(message: ChatMessage) {
+            onMessage(message)
+        }
+
+        override suspend fun clearMessages() {
+            synchronized(chatMessages) {
+                val size = chatMessages.size
+                chatMessages.clear()
+                size
+            }.let {
+                removeMessages.emit(it)
+            }
+        }
+
+        override suspend fun getIntegrityToken() {
+            integrity.emit("refresh")
+        }
+    }
+
     private fun readChatFile(url: String, channelId: String?, channelLogin: String?) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val nameDisplay = applicationContext.prefs().getString(C.UI_NAME_DISPLAY, "0")
-                val messages = mutableListOf<ChatMessage>()
+                val liveMessages = mutableListOf<ChatMessage>()
+                val messages = mutableListOf<VideoChatMessage>()
                 var startTimeMs = 0L
                 val twitchEmotes = mutableListOf<TwitchEmote>()
                 val twitchBadges = mutableListOf<TwitchBadge>()
@@ -2276,40 +2699,36 @@ class ChatViewModel @Inject constructor(
                                         when (reader.peek()) {
                                             JsonToken.NAME -> {
                                                 when (reader.nextName().also { position += it.length + 3 }) {
-                                                    "liveStartTime" -> { TwitchApiHelper.parseIso8601DateUTC(reader.nextString().also { position += it.length + 2 })?.let { startTimeMs = it } }
+                                                    "liveStartTime" -> {
+                                                        val time = reader.nextString().also { position += it.length + 2 }
+                                                        Instant.parseOrNull(time)?.toEpochMilliseconds()?.takeIf { ms -> ms > 0 }?.let { startTimeMs = it }
+                                                    }
                                                     "liveComments" -> {
                                                         reader.beginArray().also { position += 1 }
                                                         while (reader.hasNext()) {
                                                             val message = reader.nextString().also { position += it.length + 2 + it.count { c -> c == '"' || c == '\\' } }
-                                                            when {
-                                                                message.contains("PRIVMSG") -> {
-                                                                    val chatMessage = ChatUtils.parseChatMessage(message, false)
+                                                            val ircMessage = ChatUtils.parseIRCMessage(message)
+                                                            when (ircMessage.command) {
+                                                                "PRIVMSG", "USERNOTICE" -> {
+                                                                    val chatMessage = ChatUtils.parseChatMessage(ircMessage)
                                                                     if (chatMessage.reply?.message != null) {
-                                                                        messages.add(ChatMessage(
+                                                                        liveMessages.add(ChatMessage(
+                                                                            type = ChatMessage.REPLY_MESSAGE,
                                                                             reply = chatMessage.reply,
-                                                                            isReply = true,
                                                                             replyParent = chatMessage,
                                                                         ))
                                                                     }
-                                                                    messages.add(chatMessage)
+                                                                    liveMessages.add(chatMessage)
                                                                 }
-                                                                message.contains("USERNOTICE") -> {
-                                                                    val chatMessage = ChatUtils.parseChatMessage(message, true)
-                                                                    if (chatMessage.reply?.message != null) {
-                                                                        messages.add(ChatMessage(
-                                                                            reply = chatMessage.reply,
-                                                                            isReply = true,
-                                                                            replyParent = chatMessage,
-                                                                        ))
+                                                                "CLEARMSG" -> {
+                                                                    val chatMessage = ChatUtils.parseClearMessage(ircMessage)
+                                                                    val deletedMessage = chatMessage.targetMsgId?.let { targetId ->
+                                                                        liveMessages.find { it.id == targetId }
                                                                     }
-                                                                    messages.add(chatMessage)
+                                                                    liveMessages.add(getClearMessage(chatMessage, deletedMessage, nameDisplay))
                                                                 }
-                                                                message.contains("CLEARMSG") -> {
-                                                                    val pair = ChatUtils.parseClearMessage(message)
-                                                                    val deletedMessage = pair.second?.let { targetId -> messages.find { it.id == targetId } }
-                                                                    messages.add(getClearMessage(pair.first, deletedMessage, nameDisplay))
-                                                                }
-                                                                message.contains("CLEARCHAT") -> messages.add(ChatUtils.parseClearChat(applicationContext, message))
+                                                                "CLEARCHAT" -> liveMessages.add(ChatUtils.parseClearChat(applicationContext, ircMessage))
+                                                                "NOTICE" -> liveMessages.add(ChatUtils.parseNotice(ircMessage))
                                                             }
                                                             if (reader.peek() != JsonToken.END_ARRAY) {
                                                                 position += 1
@@ -2324,6 +2743,7 @@ class ChatViewModel @Inject constructor(
                                                             val message = StringBuilder()
                                                             var id: String? = null
                                                             var offsetSeconds: Int? = null
+                                                            var createdAt: String? = null
                                                             var userId: String? = null
                                                             var userLogin: String? = null
                                                             var userName: String? = null
@@ -2349,6 +2769,7 @@ class ChatViewModel @Inject constructor(
                                                                         reader.endObject().also { position += 1 }
                                                                     }
                                                                     "contentOffsetSeconds" -> offsetSeconds = reader.nextInt().also { position += it.toString().length }
+                                                                    "createdAt" -> createdAt = reader.nextString().also { position += it.length + 2 }
                                                                     "message" -> {
                                                                         reader.beginObject().also { position += 1 }
                                                                         while (reader.hasNext()) {
@@ -2439,19 +2860,6 @@ class ChatViewModel @Inject constructor(
                                                                                 position += 1
                                                                             }
                                                                         }
-                                                                        messages.add(ChatMessage(
-                                                                            id = id,
-                                                                            userId = userId,
-                                                                            userLogin = userLogin,
-                                                                            userName = userName,
-                                                                            message = message.toString(),
-                                                                            color = color,
-                                                                            emotes = emotesList,
-                                                                            badges = badgesList,
-                                                                            bits = 0,
-                                                                            timestamp = offsetSeconds?.times(1000L),
-                                                                            fullMsg = null
-                                                                        ))
                                                                         reader.endObject().also { position += 1 }
                                                                     }
                                                                     else -> position += skipJsonValue(reader)
@@ -2460,6 +2868,19 @@ class ChatViewModel @Inject constructor(
                                                                     position += 1
                                                                 }
                                                             }
+                                                            messages.add(VideoChatMessage(
+                                                                id = id,
+                                                                offsetSeconds = offsetSeconds,
+                                                                createdAt = createdAt,
+                                                                userId = userId,
+                                                                userLogin = userLogin,
+                                                                userName = userName,
+                                                                message = message.toString(),
+                                                                color = color,
+                                                                emotes = emotesList,
+                                                                badges = badgesList,
+                                                                fullMsg = null
+                                                            ))
                                                             reader.endObject().also { position += 1 }
                                                             if (reader.peek() != JsonToken.END_ARRAY) {
                                                                 position += 1
@@ -2637,18 +3058,30 @@ class ChatViewModel @Inject constructor(
                         } while (token != JsonToken.END_DOCUMENT)
                     }
                 }
-                _localTwitchEmotes.value = twitchEmotes
-                _channelBadges.value = twitchBadges
-                _cheerEmotes.value = cheerEmotesList
-                _channelStvEmotes.value = emotes
+                synchronized(localTwitchEmotes) {
+                    localTwitchEmotes.clear()
+                    localTwitchEmotes.addAll(twitchEmotes)
+                }
+                synchronized(channelBadges) {
+                    channelBadges.clear()
+                    channelBadges.addAll(twitchBadges)
+                }
+                synchronized(cheerEmotes) {
+                    cheerEmotes.clear()
+                    cheerEmotes.addAll(cheerEmotesList)
+                }
+                synchronized(thirdPartyEmotes) {
+                    thirdPartyEmotes.clear()
+                    thirdPartyEmotes.addAll(emotes)
+                }
                 if (emotes.isEmpty()) {
                     viewModelScope.launch {
                         loadEmotes(channelId, channelLogin)
                     }
                 }
-                if (messages.isNotEmpty()) {
+                if (liveMessages.isNotEmpty() || messages.isNotEmpty()) {
                     viewModelScope.launch {
-                        chatReplayManagerLocal?.setMessages(messages, startTimeMs)
+                        chatReplayManagerLocal?.setMessages(liveMessages, messages, startTimeMs)
                     }
                 }
             } catch (e: Exception) {
@@ -2701,13 +3134,19 @@ class ChatViewModel @Inject constructor(
     }
 
     companion object {
-        private const val TAG = "ChatViewModel"
-
         private var savedEmoteSets: List<String>? = null
         private var savedUserEmotes: List<TwitchEmote>? = null
         private var savedGlobalBadges: List<TwitchBadge>? = null
-        private var savedGlobalStvEmotes: List<Emote>? = null
-        private var savedGlobalBttvEmotes: List<Emote>? = null
-        private var savedGlobalFfzEmotes: List<Emote>? = null
+        private var savedGlobalSTVEmotes: List<Emote>? = null
+        private var savedGlobalBTTVEmotes: List<Emote>? = null
+        private var savedGlobalFFZEmotes: List<Emote>? = null
+
+        val ChatViewModelFactory = viewModelFactory {
+            initializer {
+                val application = (this[APPLICATION_KEY] as XtraApp)
+                val xtraModule = application.xtraModule
+                ChatViewModel(application.applicationContext, xtraModule.graphQLRepository, xtraModule.helixRepository, xtraModule.playerRepository, xtraModule.trustManager, xtraModule.json)
+            }
+        }
     }
 }

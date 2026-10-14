@@ -4,7 +4,6 @@ import android.app.Dialog
 import android.content.Context
 import android.os.Bundle
 import androidx.appcompat.widget.SearchView
-import androidx.core.os.bundleOf
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.fragment.app.DialogFragment
@@ -17,14 +16,14 @@ import androidx.paging.PagingDataAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.github.andreyasadchy.xtra.databinding.DialogSearchTagsBinding
 import com.github.andreyasadchy.xtra.model.ui.Tag
+import com.github.andreyasadchy.xtra.ui.common.SearchTagsViewModel.Companion.SearchTagsViewModelFactory
 import com.github.andreyasadchy.xtra.util.getAlertDialogBuilder
-import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlin.time.Duration.Companion.milliseconds
 
-@AndroidEntryPoint
 class SearchTagsDialog : DialogFragment() {
 
     interface OnTagSelectedListener {
@@ -36,14 +35,16 @@ class SearchTagsDialog : DialogFragment() {
 
         fun newInstance(getGameTags: Boolean): SearchTagsDialog {
             return SearchTagsDialog().apply {
-                arguments = bundleOf(GET_GAME_TAGS to getGameTags)
+                arguments = Bundle().apply {
+                    putBoolean(GET_GAME_TAGS, getGameTags)
+                }
             }
         }
     }
 
     private var _binding: DialogSearchTagsBinding? = null
     private val binding get() = _binding!!
-    private val viewModel: SearchTagsViewModel by viewModels()
+    private val viewModel: SearchTagsViewModel by viewModels { SearchTagsViewModelFactory }
     private lateinit var pagingAdapter: PagingDataAdapter<Tag, out RecyclerView.ViewHolder>
     private var listener: OnTagSelectedListener? = null
 
@@ -101,7 +102,7 @@ class SearchTagsDialog : DialogFragment() {
                     job?.cancel()
                     if (newText.isNotEmpty()) {
                         job = lifecycleScope.launch {
-                            delay(750)
+                            delay(750.milliseconds)
                             withResumed {
                                 viewModel.setQuery(newText)
                             }

@@ -27,28 +27,27 @@ import com.github.andreyasadchy.xtra.databinding.FragmentSearchBinding
 import com.github.andreyasadchy.xtra.ui.channel.ChannelPagerFragmentDirections
 import com.github.andreyasadchy.xtra.ui.common.BaseNetworkFragment
 import com.github.andreyasadchy.xtra.ui.common.FragmentHost
-import com.github.andreyasadchy.xtra.ui.common.IntegrityDialog
 import com.github.andreyasadchy.xtra.ui.common.Sortable
+import com.github.andreyasadchy.xtra.ui.main.MainActivity
+import com.github.andreyasadchy.xtra.ui.search.SearchPagerViewModel.Companion.SearchPagerViewModelFactory
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.TwitchApiHelper
 import com.github.andreyasadchy.xtra.util.getAlertDialogBuilder
-import com.github.andreyasadchy.xtra.util.gone
 import com.github.andreyasadchy.xtra.util.prefs
 import com.github.andreyasadchy.xtra.util.reduceDragSensitivity
 import com.google.android.material.tabs.TabLayout
 import com.google.android.material.tabs.TabLayoutMediator
-import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlin.time.Duration.Companion.milliseconds
 
-@AndroidEntryPoint
 class SearchPagerFragment : BaseNetworkFragment(), FragmentHost {
 
     private var _binding: FragmentSearchBinding? = null
     private val binding get() = _binding!!
-    private val viewModel: SearchPagerViewModel by viewModels()
+    private val viewModel: SearchPagerViewModel by viewModels { SearchPagerViewModelFactory }
     private var firstLaunch = true
 
     override val currentFragment: Fragment?
@@ -68,15 +67,8 @@ class SearchPagerFragment : BaseNetworkFragment(), FragmentHost {
         super.onViewCreated(view, savedInstanceState)
         viewLifecycleOwner.lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                viewModel.integrity.collectLatest {
-                    if (it != null &&
-                        it != "done" &&
-                        requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false) &&
-                        requireContext().prefs().getBoolean(C.USE_WEBVIEW_INTEGRITY, true)
-                    ) {
-                        IntegrityDialog.show(childFragmentManager, it)
-                        viewModel.integrity.value = "done"
-                    }
+                viewModel.integrity.collect {
+                    (requireActivity() as? MainActivity)?.getNewIntegrityToken(it, childFragmentManager)
                 }
             }
         }
@@ -106,7 +98,7 @@ class SearchPagerFragment : BaseNetworkFragment(), FragmentHost {
                 }
             }
             if (tabs.size <= 1) {
-                tabLayout.gone()
+                tabLayout.visibility = View.GONE
             } else {
                 if (tabs.size >= 5) {
                     tabLayout.tabGravity = TabLayout.GRAVITY_CENTER
@@ -137,7 +129,11 @@ class SearchPagerFragment : BaseNetworkFragment(), FragmentHost {
                                 appBar.setLiftable(false)
                                 appBar.background = null
                             }
-                            (fragment as? Sortable)?.setupSortBar(sortBar) ?: sortBar.root.gone()
+                            if (fragment is Sortable) {
+                                fragment.setupSortBar(sortBar)
+                            } else {
+                                sortBar.root.visibility = View.GONE
+                            }
                         }
                     }
                 }
@@ -179,7 +175,7 @@ class SearchPagerFragment : BaseNetworkFragment(), FragmentHost {
                                     viewModel.loadUserResult(
                                         checkedId = checkedId,
                                         result = result,
-                                        networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, "OkHttp"),
+                                        networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
                                         gqlHeaders = TwitchApiHelper.getGQLHeaders(requireContext()),
                                         enableIntegrity = requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
                                     )
@@ -243,7 +239,7 @@ class SearchPagerFragment : BaseNetworkFragment(), FragmentHost {
                 job?.cancel()
                 if (newText.isNotEmpty()) {
                     job = lifecycleScope.launch {
-                        delay(750)
+                        delay(750.milliseconds)
                         withResumed {
                             (currentFragment as? Searchable)?.search(newText)
                         }

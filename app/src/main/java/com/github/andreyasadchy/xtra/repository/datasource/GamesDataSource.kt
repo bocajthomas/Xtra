@@ -15,7 +15,6 @@ class GamesDataSource(
     private val helixHeaders: Map<String, String>,
     private val helixRepository: HelixRepository,
     private val enableIntegrity: Boolean,
-    private val apiPref: List<String>,
     private val networkLibrary: String?,
 ) : PagingSource<Int, Game>() {
     private var api: String? = null
@@ -24,19 +23,22 @@ class GamesDataSource(
     override suspend fun load(params: LoadParams<Int>): LoadResult<Int, Game> {
         return if (!offset.isNullOrBlank()) {
             try {
-                loadFromApi(api, params)
+                loadFromApi(params)
             } catch (e: Exception) {
                 LoadResult.Error(e)
             }
         } else {
             try {
-                loadFromApi(apiPref.getOrNull(0), params)
+                api = C.GQL
+                loadFromApi(params)
             } catch (e: Exception) {
                 try {
-                    loadFromApi(apiPref.getOrNull(1), params)
+                    api = C.GQL_PERSISTED_QUERY
+                    loadFromApi(params)
                 } catch (e: Exception) {
                     try {
-                        loadFromApi(apiPref.getOrNull(2), params)
+                        api = C.HELIX
+                        loadFromApi(params)
                     } catch (e: Exception) {
                         LoadResult.Error(e)
                     }
@@ -45,9 +47,8 @@ class GamesDataSource(
         }
     }
 
-    private suspend fun loadFromApi(apiPref: String?, params: LoadParams<Int>): LoadResult<Int, Game> {
-        api = apiPref
-        return when (apiPref) {
+    private suspend fun loadFromApi(params: LoadParams<Int>): LoadResult<Int, Game> {
+        return when (api) {
             C.GQL -> gqlQueryLoad(params)
             C.GQL_PERSISTED_QUERY -> gqlLoad(params)
             C.HELIX -> if (!helixHeaders[C.HEADER_TOKEN].isNullOrBlank() && tags.isNullOrEmpty()) helixLoad(params) else throw Exception()
@@ -58,19 +59,19 @@ class GamesDataSource(
     private suspend fun gqlQueryLoad(params: LoadParams<Int>): LoadResult<Int, Game> {
         val response = graphQLRepository.loadQueryTopGames(networkLibrary, gqlHeaders, tags, params.loadSize, offset)
         if (enableIntegrity) {
-            response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
+            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
         }
         val data = response.data!!.games!!
         val items = data.edges!!
         val list = items.mapNotNull { item ->
             item?.node?.let {
                 Game(
-                    gameId = it.id,
-                    gameSlug = it.slug,
-                    gameName = it.displayName,
-                    boxArtUrl = it.boxArtURL,
-                    viewersCount = it.viewersCount,
-                    broadcastersCount = it.broadcastersCount,
+                    id = it.id,
+                    slug = it.slug,
+                    name = it.displayName,
+                    boxArtURL = it.boxArtURL,
+                    viewerCount = it.viewersCount,
+                    broadcasterCount = it.broadcastersCount,
                     tags = it.tags?.map { tag ->
                         Tag(
                             id = tag.id,
@@ -94,18 +95,18 @@ class GamesDataSource(
     private suspend fun gqlLoad(params: LoadParams<Int>): LoadResult<Int, Game> {
         val response = graphQLRepository.loadTopGames(networkLibrary, gqlHeaders, tags, params.loadSize, offset)
         if (enableIntegrity) {
-            response.errors?.find { it.message == "failed integrity check" }?.let { return LoadResult.Error(Exception(it.message)) }
+            response.errors?.find { it.message == C.FAILED_INTEGRITY_CHECK }?.let { return LoadResult.Error(Exception(it.message)) }
         }
         val data = response.data!!.directoriesWithTags
         val items = data.edges
         val list = items.map { item ->
             item.node.let {
                 Game(
-                    gameId = it.id,
-                    gameSlug = it.slug,
-                    gameName = it.displayName,
-                    boxArtUrl = it.avatarURL,
-                    viewersCount = it.viewersCount,
+                    id = it.id,
+                    slug = it.slug,
+                    name = it.displayName,
+                    boxArtURL = it.avatarURL,
+                    viewerCount = it.viewersCount,
                     tags = it.tags?.map { tag ->
                         Tag(
                             id = tag.id,
@@ -135,9 +136,9 @@ class GamesDataSource(
         )
         val list = response.data.map {
             Game(
-                gameId = it.id,
-                gameName = it.name,
-                boxArtUrl = it.boxArtUrl,
+                id = it.id,
+                name = it.name,
+                boxArtURL = it.boxArtURL,
             )
         }
         offset = response.pagination?.cursor
